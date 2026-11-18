@@ -1,6 +1,6 @@
 """A posterior session: samples of the whole BN given the evidence so far, updated as observations arrive.
 
-The rows start as cliques.sample's draws from P(everything | evidence), each with log weight 0. A
+The rows start as the clique tree's draws (trees.sample) from P(everything | evidence), each with log weight 0. A
 new observation X = x is taken in by importance weighting: each row's weight is multiplied by the
 probability of x given X's Markov blanket in that row, from the tbnpy objects' log_prob over
 (childs, parents), and X is set to x; the rest of the row stays as it is:
@@ -13,7 +13,7 @@ probability of x given X's Markov blanket in that row, from the tbnpy objects' l
 When the effective sample size (sum w)^2 / sum w^2 falls below `threshold` of the rows, the
 session samples again with all the evidence, its chains starting from the current rows' SA and E,
 drawn by weight; the burn-in stays as for a cold start. With no evidence the sampler needs no chains:
-cliques.sample passes once down the tree.
+the clique tree is passed once, downwards.
 
 The queries are weighted means over the rows, with standard errors from groups of chains: the
 probability of each system's Fail and each edge's closure, L, the population cut off (the
@@ -32,13 +32,45 @@ from src.cancellation import check_cancelled, report_progress
 
 from src.builder.kernels import Probability
 from src.builder.kernels.observation import ObservedIntensity
-from . import cliques
+from . import trees
 
 N_GROUP = 20
 SAMPLER = {"n_chain": 100, "n_burn": 200, "n_keep": 2_000, "bridge": 8}
 
 
-WORDS = {"EdgeOpen": {"False": "closed", "True": "open"}}     # states as an operator says them
+WORDS = {"EdgeOpen": {"False": "closed", "True": "open"},     # states as an operator says them, by family
+         "RoadOpen": {"False": "closed", "True": "open"},
+         "PGD": {"False": "no", "True": "yes"}}                # evidence on PGD: whether the ground failed, PGD > 0
+UNITS = {"PGV": "cm/s", "PGD": "m"}                            # a continuous variable's unit, if not g
+
+
+def _family(var):
+    """The quantity family of a variable: RoadOpen for RoadOpen.Landslide::G002, PGD for PGD.Liquefaction::..."""
+    return var.split("::")[0].split(".")[0]
+
+
+def _occurrence(var):
+    """Whether var is a PGD, observed only as whether the ground failed (PGD > 0: 1) or not (0)."""
+    return _family(var) == "PGD"
+
+
+def _component_vars(comp):
+    """The observable variables of one component on an edge: a bridge's damage state; a ground-failure
+    component's PGD (whether the ground failed) and road state."""
+    return {comp["D"]} if comp["kind"] == "bridge" else {comp["R"], comp["OCC"]}
+
+
+def _comps(c):
+    """An edge's components (cliques_series.py's tree); on cliques.py's, its one bridge."""
+    return c["comps"] if "comps" in c else [{"kind": "bridge", "D": c["D"]}]
+
+
+def _edge_label(c):
+    """What an inspection of edge c is called: its bridge's id on a one-bridge edge (as before), else its
+    components' ids joined by '+'."""
+    if c.get("D") and len(_comps(c)) == 1:
+        return c["D"].split("::")[1]
+    return "+".join((comp["D"] if comp["kind"] == "bridge" else comp["R"]).split("::")[1] for comp in _comps(c))
 
 
 def _now():
@@ -61,20 +93,30 @@ def evaluate(prob, rows):
     return prob.evaluate(unique)[inverse]
 
 
-def systems(t, rows):
-    """{origin: (N,) SystemState} from the rows' edge states, each distinct edge vector evaluated once:
-    the systems all read the edges in the same order."""
+def systems(t, rows, ev=None, opened=None):
+    """{origin: (N,) SystemState} from the rows' edge states: the clique tree's message from clique (E) down to
+    each of t's system cliques (system_down), each distinct edge vector once; the systems all read the edges in
+    the same order. t needs only "systems" (and "series"): the systems asked about. With opened (EdgeOpen
+    names), {origin: (N, len(opened))}: each row's state with each of those edges opened as well."""
     check_cancelled()
     probs = list(t["systems"].values())
     names = [v.name for v in probs[0].parents]
     assert all([v.name for v in p.parents] == names for p in probs), "systems read the edges in one order"
     unique, inverse = torch.unique(_columns(rows, probs[0].parents), dim=0, return_inverse=True)
-    return {k: p.evaluate(unique)[inverse, 0].long() for k, p in t["systems"].items()}
+    down = trees.module(t).system_down
+    cols = None if opened is None else [names.index(name) for name in opened]
+    return {k: down(t, k, unique, ev or {}, cols)[0][inverse].long() for k in t["systems"]}
 
 
 def cut_off(t, states, population):
-    """(N,) L: the population of the origins whose system fails, in each row."""
-    return sum(population.get(k, 1.0) * (s == 0).double() for k, s in states.items())
+    """(N,) L: the population of the origins whose system fails, in each row. Each origin counts once, by its
+    system to any key destination (one with a source of its own, such as T01-S1 beside T01-any, is left out;
+    all count if every system has one), weighted by the population of the system or else of its origin (1
+    without one)."""
+    systems = t["systems"]
+    keep = [k for k in states if getattr(systems[k], "destination", None) is None] or list(states)
+    return sum(population.get(k, population.get(getattr(systems[k], "origin", k), 1.0)) * (states[k] == 0).double()
+               for k in keep)
 
 
 def features(t, rows, population):
@@ -140,6 +182,11 @@ class Session:
         """A session saved by save(), on the BN rebuilt as it was (t, probs, variables); and its extra."""
         data = torch.load(path, weights_only=False)          # written by save(), not from elsewhere
         meta = data["meta"]
+        # A session saved under another version of the model (e.g. its edges renamed) cannot be reopened on this one.
+        gone = sorted((set(data["rows"]) | set(meta["evidence"])) - set(variables))
+        if gone:
+            raise ValueError(f"the saved session names {len(gone)} variable(s) this model does not have "
+                             f"({', '.join(gone[:3])}{', ...' if len(gone) > 3 else ''}): the model changed since it was saved")
         s = cls.__new__(cls)
         s.t, s.probs, s.variables = t, probs, variables
         s.population, s.threshold, s.sampler, s.seed = meta["population"], meta["threshold"], meta["sampler"], meta["seed"]
@@ -186,10 +233,11 @@ class Session:
             w = (self.lw - self.lw.max()).exp()
             pick = torch.multinomial(w, self.sampler["n_chain"], replacement=True,
                                      generator=torch.Generator().manual_seed(self.seed))
-            sa0 = torch.stack([self.rows[c["SA"]][pick] for c in self.t["edges"]], dim=1)
+            sites = self.t.get("field_sites") or [c["SA"] for c in self.t["edges"]]
+            sa0 = torch.stack([self.rows[name][pick] for name in sites], dim=1)
             e0 = torch.stack([self.rows[c["E"]][pick] for c in self.t["edges"]], dim=1)
-        self.rows, self.cost = cliques.sample(self.t, self.evidence, seed=self.seed, sa0=sa0, e0=e0, **sampler)
-        self.lw = torch.zeros(len(self.rows[self.t["edges"][0]["SA"]]), dtype=torch.float64)
+        self.rows, self.cost = trees.sample(self.t, self.evidence, seed=self.seed, sa0=sa0, e0=e0, **sampler)
+        self.lw = torch.zeros(len(self.rows[self.t["edges"][0]["E"]]), dtype=torch.float64)
         self.seed += 1
 
     def _reweight(self, var, value):
@@ -199,6 +247,8 @@ class Session:
         rows, n = dict(self.rows), self.n
         own = self.producer[var]
         children = [p for p in self.order if any(v.name == var for v in p.parents)]
+        if _occurrence(var):                       # the event PGD > 0 (or = 0): the rows where it holds
+            return rows, torch.where((rows[var] > 0) == bool(value), 0.0, -math.inf).double()
         x = torch.full((n,), value, dtype=rows[var].dtype)
         if _deterministic(own):                    # P(X | parents) is 1 at the row's value only
             dlw = torch.where(rows[var] == x, 0.0, -math.inf).double()
@@ -218,9 +268,11 @@ class Session:
         if var not in self.variables:
             raise ValueError(f"no variable {var!r} in this BN")
         states = self.variables[var].values
-        if isinstance(states, tuple):                                       # continuous: (lower, upper)
+        if _occurrence(var):                                                # whether the ground failed
+            states = ["False", "True"]
+        elif isinstance(states, tuple):                                     # continuous: (lower, upper)
             return float(value)
-        words = WORDS.get(var.split("::")[0], {})
+        words = WORDS.get(_family(var), {})
         if isinstance(value, str) and value in words.values():
             value = next(s for s, w in words.items() if w == value)
         if isinstance(value, str) and value in states:
@@ -234,7 +286,7 @@ class Session:
         Adds an evidence entry to the timeline, with every decision query's values after it."""
         if var in self.evidence:
             raise ValueError(f"{var} is already in the evidence")
-        if var in self.variables and isinstance(self.variables[var].values, tuple) \
+        if var in self.variables and isinstance(self.variables[var].values, tuple) and not _occurrence(var) \
                 and not isinstance(self.producer[var], ObservedIntensity):        # SA
             raise ValueError(f"{var} cannot be observed directly: ground motion is observed only through a "
                              "station's reading (SAObs), through its measurement likelihood")
@@ -266,9 +318,11 @@ class Session:
 
     def _label(self, var, value):
         states = self.variables[var].values
+        if _occurrence(var):
+            return "ground failed (PGD > 0)" if value else "ground did not fail (PGD = 0)"
         if isinstance(states, tuple):
-            return f"{value:g} g"
-        return WORDS.get(var.split("::")[0], {}).get(states[value], states[value])
+            return f"{value:g} {UNITS.get(_family(var), 'g')}"
+        return WORDS.get(_family(var), {}).get(states[value], states[value])
 
     # ---- decision queries -------------------------------------------------------------------------
     # A decision query: {"name", "target", "decision"}. The target is a quantity per row, summarised by its
@@ -350,7 +404,8 @@ class Session:
     def _target(self, target, rows):
         kind = target["kind"]
         if kind in ("cut_off", "cut_off_at_least"):
-            L = cut_off(self.t, {k: rows[f"SystemState::{k}"] for k in self.t["systems"]}, self.population)
+            L = cut_off(self.t, {k: rows[f"SystemState::{k}"] for k in self.t["systems"] if f"SystemState::{k}" in rows},
+                        self.population)
             return L if kind == "cut_off" else (L >= target["at_least"]).double()
         if kind == "fail":
             return (rows[f"SystemState::{target['origin']}"] == 0).double()
@@ -364,19 +419,33 @@ class Session:
         if spec["decision"] == "track":
             est, se = self._means(now[:, None])
             return {"value": [est[0].item(), se[0].item()]}
-        candidates = [c for c in self.t["edges"] if c["E"] not in self.evidence and c["D"] not in self.evidence]
+        candidates = [c for c in self.t["edges"] if _comps(c) and c["E"] not in self.evidence
+                      and not any(_component_vars(comp) & self.evidence.keys() for comp in _comps(c))]
         if not candidates:
             return {}
-        # A row adds to VOI_i only where edge i is closed (opening an open edge changes nothing): evaluate those rows only.
+        # Each row as the evidence left it, E_i set open: only the messages from clique (E) down to the systems the
+        # target reads are passed again, the rest of the row standing, for every candidate edge at once (the
+        # message's opened edges). An observed system state is one before the repair, so it is not entered (the
+        # messages get no evidence). A row adds to VOI_i only where edge i is closed (opening an open edge changes
+        # nothing): those rows only.
+        kind, everything = spec["target"]["kind"], self.t["systems"]
+        keys = ([] if kind == "closed" else [spec["target"]["origin"]] if kind == "fail" else
+                [k for k, p in everything.items() if getattr(p, "destination", None) is None] or list(everything))
+        part = {"series": self.t.get("series"), "systems": {k: everything[k] for k in keys}}
+        edges = [c["E"] for c in self.t["edges"]]
+        opened = systems(part, self.rows, opened=[c["E"] for c in candidates]) if keys else {}
         F = torch.zeros(self.n, len(candidates), dtype=torch.float64)
         for j, c in enumerate(candidates):
             check_cancelled()
             closed = self.rows[c["E"]] == 0
-            if closed.any():
-                sub = {k: v[closed] for k, v in self.rows.items()}
-                F[closed, j] = now[closed] - self._target(spec["target"], self._intervene({c["E"]: 1}, sub))
+            if not closed.any():
+                continue
+            sub = {e: self.rows[e][closed] for e in edges}
+            sub[c["E"]] = torch.ones_like(sub[c["E"]])
+            rows = {**sub, **{f"SystemState::{k}": s[closed, j] for k, s in opened.items()}}
+            F[closed, j] = now[closed] - self._target(spec["target"], rows)
         est, se = self._means(F)
-        return {c["D"].split("::")[1]: [est[j].item(), se[j].item()] for j, c in enumerate(candidates)}
+        return {_edge_label(c): [est[j].item(), se[j].item()] for j, c in enumerate(candidates)}
 
     def _means(self, F, lw=None):
         """Weighted means of the columns of F (N, Q), with standard errors from N_GROUP groups of chains."""
@@ -395,8 +464,9 @@ class Session:
         previous = self.previous if self.previous and var in self.previous["rows"] else None
         edges = None
         if isinstance(self.variables[var].values, tuple):
-            samples = [self.rows[var]] + ([previous["rows"][var]] if previous else [])
-            lo = min(x.log().min().item() for x in samples)
+            samples = [x[x > 0] for x in [self.rows[var]] + ([previous["rows"][var]] if previous else [])]
+            samples = [x for x in samples if len(x)] or [torch.ones(1, dtype=torch.float64)]
+            lo = min(x.log().min().item() for x in samples)       # a zero (no ground failure) is counted apart
             hi = max(x.log().max().item() for x in samples)
             edges = torch.linspace(lo, hi + 1e-9, bins + 1, dtype=torch.float64)
         out = self._distribution(var, self.rows, self.lw, self.evidence, self.timeline[-1]["at"], edges)
@@ -409,17 +479,25 @@ class Session:
         if not isinstance(states, tuple):
             F = torch.nn.functional.one_hot(x.long(), len(states)).double()
             est, se = self._means(F, lw)
-            words = WORDS.get(var.split("::")[0], {})
+            words = WORDS.get(_family(var), {})
             return {**out, "kind": "discrete", "states": [words.get(s, s) for s in states], "p": est.tolist(),
                     "se": se.tolist()}
-        lx = x.log()
+        pos = x > 0                                     # PGD is 0 where the ground does not fail
+        lx = torch.where(pos, x.clamp_min(1e-300).log(), torch.zeros_like(x))
         n_bins = len(edges) - 1
         k = (torch.bucketize(lx, edges) - 1).clamp(0, n_bins - 1)
-        F = torch.nn.functional.one_hot(k, n_bins).double() / (edges[1] - edges[0])
+        F = torch.nn.functional.one_hot(k, n_bins).double() * pos[:, None] / (edges[1] - edges[0])
         est, se = self._means(F, lw)
-        mean, _ = self._means(lx[:, None], lw)
-        return {**out, "kind": "continuous", "unit": "g", "ln_edges": edges.tolist(), "density": est.tolist(),
-                "se": se.tolist(), "median_g": math.exp(mean.item())}
+        unit = UNITS.get(_family(var), "g")
+        res = {**out, "kind": "continuous", "unit": unit, "ln_edges": edges.tolist(), "density": est.tolist(),
+               "se": se.tolist()}
+        if bool(pos.all()):
+            mean, _ = self._means(lx[:, None], lw)
+            return {**res, "median_g": math.exp(mean.item())}
+        p_zero, _ = self._means((~pos).double()[:, None], lw)
+        both, _ = self._means(torch.stack([lx * pos, pos.double()], 1), lw)
+        return {**res, "p_zero": p_zero.item(),
+                "median_g": math.exp(both[0].item() / both[1].item()) if both[1].item() > 0 else None}
 
     def result(self, computed=(), statement=""):
         """The map's numbers given the evidence so far, in the shape of an engine result: P(Fail) per
@@ -429,12 +507,16 @@ class Session:
 
         events = []
         names = ([(f"SystemState::{k}", "Fail") for k in self.t["systems"]]
-                 + [(c["E"], "False") for c in self.t["edges"]])
-        F = torch.stack([(self.rows[n] == 0).double() for n, _ in names], dim=1)
+                 + [(c["E"], "False") for c in self.t["edges"]]
+                 + [(comp["R"], "False") for c in self.t["edges"] for comp in _comps(c) if comp["kind"] == "ground"]
+                 + [(comp["PGD"], ">0") for c in self.t["edges"] for comp in _comps(c) if comp["kind"] == "ground"])
+        F = torch.stack([(self.rows[n] > 0 if v == ">0" else self.rows[n] == (1 if v == "True" else 0)).double()
+                         for n, v in names], dim=1)
         est, se = self._means(F)
         for j, (node, value) in enumerate(names):
             p, half = est[j].item(), 1.96 * se[j].item()
-            events.append({"node": node, "op": "==", "value": value, "p": p,
+            op, value = (">", 0) if value == ">0" else ("==", value)          # the ground failed: PGD > 0
+            events.append({"node": node, "op": op, "value": value, "p": p,
                            "ci95": [max(0.0, p - half), min(1.0, p + half)]})
         notes = []
         for prob in self.probs.values():
@@ -444,17 +526,21 @@ class Session:
                 "statement": statement or "Every origin's access and every edge's state, given the evidence so far",
                 "samples": self.n, "elapsed_s": round(self.elapsed, 1), "computed": list(computed),
                 "warnings": notes + [report["note"]], "record": None,
-                "inference": {"method": "clique tree (src/inference/cliques.py)", "ess": self.ess()}}
+                "inference": {"method": trees.method(self.t), "ess": self.ess()}}
 
     def state(self):
         """What the page shows: the evidence, the decision queries and the timeline."""
-        kinds = {"SAObs": "reading", "DamageState": "damage", "EdgeOpen": "edge", "SystemState": "system"}
+        kinds = {"SAObs": "reading", "DamageState": "damage", "EdgeOpen": "edge", "SystemState": "system",
+                 "RoadOpen": "road", "PGD": "occurrence"}
         variables = {}
         for name in self.rows:                                    # what can be observed or decided; SA cannot
             kind = kinds.get(name.split("::")[0].split("(")[0].split(".")[0])
+            if kind == "system" and getattr(self.producer.get(name), "rules", True) is None:
+                continue                                          # judged directly: no rules to resample it under
             if kind:
-                states = self.variables[name].values
-                words = WORDS.get(name.split("::")[0], {})
+                states = ("False", "True") if kind == "occurrence" else self.variables[name].values
+                states = list(states) if kind == "occurrence" else states
+                words = WORDS.get(_family(name), {})
                 variables[name] = {"kind": kind, "states": None if isinstance(states, tuple)
                                    else [words.get(s, s) for s in states]}
         return {"evidence": {v: {"value": x, "label": self._label(v, x)} for v, x in self.evidence.items()},
@@ -478,7 +564,9 @@ class Session:
         out = []
         for c in self.t["edges"]:
             back = est[f"restored by do({c['E']} open)"]
-            out.append({"edge": c["E"].split("::")[1], "observed": c["E"] in self.evidence or c["D"] in self.evidence,
+            out.append({"edge": c["E"].split("::")[1],
+                        "observed": c["E"] in self.evidence or any(_component_vars(comp) & self.evidence.keys()
+                                                                   for comp in _comps(c)),
                         "p_closed": est[f"P({c['E']} closed)"], "L": L, "L_do_open": (L[0] - back[0], back[1]),
                         "restored": back})
         return out

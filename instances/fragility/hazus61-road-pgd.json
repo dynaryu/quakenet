@@ -1,0 +1,82 @@
+{
+  "$schema": "../../schema/meta/parameter-sets.schema.json",
+  "function": "fragility.road",
+  "source": {
+    "document": "Hazus Earthquake Model Technical Manual",
+    "version": "6.1",
+    "date": "July 2024",
+    "section": "7.1",
+    "table": "7-5",
+    "url": "https://www.fema.gov/sites/default/files/documents/fema_hazus-earthquake-model-technical-manual-6-1.pdf",
+    "transcription": "instances/fragility/hazus61-source.md",
+    "application": "Roadway damage on PGD; the road is taken as closed at Extensive/Complete, the worst Hazus roadway state. Medians converted from inches (60 in, 24 in) to m."
+  },
+  "sets": [
+    {
+      "id": "hazus61.road.liquefaction.HRD1",
+      "label": "Hazus 6.1 major road (HRD1) on liquefaction PGD, closed at Extensive/Complete",
+      "values": {
+        "pgd": "PGD.Liquefaction",
+        "open": "RoadOpen.Liquefaction",
+        "closing_state": "extensive",
+        "median_m": 1.524,
+        "beta": 0.7
+      }
+    },
+    {
+      "id": "hazus61.road.liquefaction.HRD2",
+      "label": "Hazus 6.1 urban road (HRD2) on liquefaction PGD, closed at Extensive/Complete",
+      "values": {
+        "pgd": "PGD.Liquefaction",
+        "open": "RoadOpen.Liquefaction",
+        "closing_state": "extensive",
+        "median_m": 0.6096,
+        "beta": 0.7
+      }
+    },
+    {
+      "id": "hazus61.road.landslide.HRD1",
+      "label": "Hazus 6.1 major road (HRD1) on landslide PGD, closed at Extensive/Complete",
+      "values": {
+        "pgd": "PGD.Landslide",
+        "open": "RoadOpen.Landslide",
+        "closing_state": "extensive",
+        "median_m": 1.524,
+        "beta": 0.7
+      }
+    },
+    {
+      "id": "hazus61.road.landslide.HRD2",
+      "label": "Hazus 6.1 urban road (HRD2) on landslide PGD, closed at Extensive/Complete",
+      "values": {
+        "pgd": "PGD.Landslide",
+        "open": "RoadOpen.Landslide",
+        "closing_state": "extensive",
+        "median_m": 0.6096,
+        "beta": 0.7
+      }
+    },
+    {
+      "id": "hazus61.road.fault.HRD1",
+      "label": "Hazus 6.1 major road (HRD1) on fault PGD, closed at Extensive/Complete",
+      "values": {
+        "pgd": "PGD.FaultOffset",
+        "open": "RoadOpen.FaultRupture",
+        "closing_state": "extensive",
+        "median_m": 1.524,
+        "beta": 0.7
+      }
+    },
+    {
+      "id": "hazus61.road.fault.HRD2",
+      "label": "Hazus 6.1 urban road (HRD2) on fault PGD, closed at Extensive/Complete",
+      "values": {
+        "pgd": "PGD.FaultOffset",
+        "open": "RoadOpen.FaultRupture",
+        "closing_state": "extensive",
+        "median_m": 0.6096,
+        "beta": 0.7
+      }
+    }
+  ]
+}

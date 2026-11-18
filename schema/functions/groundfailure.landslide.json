@@ -1,0 +1,64 @@
+{
+  "$schema": "../meta/function.schema.json",
+  "id": "groundfailure.landslide",
+  "label": "Landslide: how far the slope slides (0 where it holds)",
+  "version": "0.3.0",
+  "role": "hazard",
+  "per": "GroundFailure",
+  "inputs": [
+    {
+      "name": "pgv",
+      "quantity": "PGV",
+      "over": "GroundFailure",
+      "via": "self",
+      "description": "PGV at the component, in cm/s: the shaking the occurrence model reads."
+    },
+    {
+      "name": "pga",
+      "quantity": "PGA",
+      "over": "GroundFailure",
+      "via": "self",
+      "description": "PGA at the component, in g: below the model's floor the ground does not fail."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "pgd",
+      "quantity": "PGD.Landslide"
+    }
+  ],
+  "attributes": [
+    "x0",
+    "slope_deg",
+    "length_km",
+    "ac_g"
+  ],
+  "instance_schema": {
+    "type": "object",
+    "required": [
+      "model"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "model": {
+        "type": "object",
+        "required": [
+          "jessee2018",
+          "patch_m",
+          "jibson2007"
+        ]
+      }
+    }
+  },
+  "implementation": "src.builder.kernels.ground:LandslidePGD",
+  "deterministic": false,
+  "drawKind": "Marginal",
+  "capabilities": [
+    "SampleForward",
+    "EvaluateLikelihood"
+  ],
+  "source": {
+    "citation": "Nowicki Jessee et al. (2018) JGR Earth Surface 123:1835, USGS slim form (code.usgs.gov ghsc/esi/groundfailure, jessee_2018.py and jessee_2018_slim.py, commit fa7bd28). Given it occurs: Jibson (2007) Engineering Geology 91:209, Eq. 6, as OpenQuake implements it (openquake/sep/landslide/displacement.py, commit 0f9c75e)."
+  },
+  "description": "PGD > 0 only if the slope fails and slides: the slope fails with P = 1 - (1 - f)^(L / patch), f = Nowicki Jessee et al. (2018)'s areal coverage at x0 + b_pgv ln PGV' + b_int ln PGV' x slope, PGV' = min(PGV, clip), 0 below its PGA floor; it slides only where r = ac / PGA < 1 (Newmark). Given both, log10 PGD(cm) ~ N(c1 + log10((1 - r)^c2 r^c3), sigma_log10), r floored at ratio_min (Jibson 2007 Eq. 6). Else PGD = 0. Occurrence (the ground moved) is the event PGD > 0."
+}

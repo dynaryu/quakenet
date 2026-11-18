@@ -315,6 +315,10 @@ _TYPES = {
     "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
     "string": lambda v: isinstance(v, str),
     "boolean": lambda v: isinstance(v, bool),
+    # [lat, lon] points, e.g. an edge's course
+    "path": lambda v: isinstance(v, list) and all(
+        isinstance(q, list) and len(q) == 2 and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in q)
+        for q in v),
 }
 
 

@@ -451,6 +451,75 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
    ],
    "type": "enum(5)"
   },
+  "PGD.Liquefaction": {
+   "id": "PGD.Liquefaction",
+   "label": "Permanent ground displacement: liquefaction",
+   "kind": "continuous",
+   "unit": "m",
+   "range": [
+    0,
+    null
+   ],
+   "description": "Permanent ground displacement from lateral spread or settlement: 0 where the stretch does not liquefy, so liquefaction occurs exactly when it is positive.",
+   "type": "m"
+  },
+  "PGD.Landslide": {
+   "id": "PGD.Landslide",
+   "label": "Permanent ground displacement: landslide",
+   "kind": "continuous",
+   "unit": "m",
+   "range": [
+    0,
+    null
+   ],
+   "description": "Permanent ground displacement from Newmark sliding of the slope: 0 where the slope holds or does not slide, so the ground moved exactly when it is positive.",
+   "type": "m"
+  },
+  "PGD.FaultOffset": {
+   "id": "PGD.FaultOffset",
+   "label": "Permanent ground displacement: fault crossing",
+   "kind": "continuous",
+   "unit": "m",
+   "range": [
+    0,
+    null
+   ],
+   "description": "Permanent ground displacement from the fault's offset: 0 without surface rupture, so the fault ruptured at the crossing exactly when it is positive.",
+   "type": "m"
+  },
+  "RoadOpen.Liquefaction": {
+   "id": "RoadOpen.Liquefaction",
+   "label": "Road open at a liquefaction component",
+   "kind": "discrete",
+   "states": [
+    "False",
+    "True"
+   ],
+   "description": "Whether the road stays usable where the ground moved (liquefaction): False closed, True open. The edge is open only if every such component on it is.",
+   "type": "{False,True}"
+  },
+  "RoadOpen.Landslide": {
+   "id": "RoadOpen.Landslide",
+   "label": "Road open at a landslide component",
+   "kind": "discrete",
+   "states": [
+    "False",
+    "True"
+   ],
+   "description": "Whether the road stays usable where the ground moved (landslide): False closed, True open. The edge is open only if every such component on it is.",
+   "type": "{False,True}"
+  },
+  "RoadOpen.FaultRupture": {
+   "id": "RoadOpen.FaultRupture",
+   "label": "Road open at a fault crossing component",
+   "kind": "discrete",
+   "states": [
+    "False",
+    "True"
+   ],
+   "description": "Whether the road stays usable where the ground moved (fault crossing): False closed, True open. The edge is open only if every such component on it is.",
+   "type": "{False,True}"
+  },
   "EdgeOpen": {
    "id": "EdgeOpen",
    "label": "Edge open to traffic",
@@ -559,6 +628,16 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
      "type": "number",
      "unit": "km/h",
      "description": "Average travel speed on this edge; travel time is length_km / avg_speed_kph."
+    },
+    "fixed_open": {
+     "type": "boolean",
+     "required": false,
+     "description": "True for an edge that cannot close (nothing on it can fail): it stays in the graph the system functions evaluate, always open, but is not a random variable, so no EdgeOpen node is made for it. Left out (or false) for an edge that can close."
+    },
+    "geometry": {
+     "type": "path",
+     "required": false,
+     "description": "The road's course from source to target, as [lat, lon] points (the end nodes included), for drawing only. Left out, the edge is drawn as a straight line."
     }
    }
   },
@@ -578,6 +657,13 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
      "ref": "Edge",
      "description": "The edge this bridge carries. An edge with several bridges is open only if every one is in a damage state its closure policy keeps open."
     },
+    "chainage_km": {
+     "type": "number",
+     "unit": "km",
+     "required": false,
+     "minimum": 0,
+     "description": "Distance along its edge from the edge's source node. Orders the edge's components in its series table (edge.open); left out, they keep the binding's order."
+    },
     "hazus_class": {
      "type": "string",
      "description": "HWB1 ... HWB28; selects the fragility parameter set."
@@ -595,6 +681,102 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
     }
    },
    "description": "A bridge, where it is and what kind it is. Its location is what every hazard function reads, so ground motion is one node per bridge."
+  },
+  {
+   "id": "GroundFailure",
+   "label": "Ground-failure component",
+   "description": "A stretch of road exposed to one ground-failure mechanism (liquefaction, landslide) or a crossing of a mapped active fault, placed by exposure, not by what happened. Like a bridge it sits on one edge, and the edge is open only if all its bridges and ground-failure components are. Each mechanism is a chain of its own: occurrence, then permanent ground displacement (PGD), then whether the road stays open. Which attributes a row needs depends on its kind; the functions bound to that kind list them.",
+   "attributes": {
+    "lat": {
+     "type": "number",
+     "unit": "deg"
+    },
+    "lon": {
+     "type": "number",
+     "unit": "deg"
+    },
+    "edge": {
+     "ref": "Edge",
+     "description": "The edge this component lies on."
+    },
+    "chainage_km": {
+     "type": "number",
+     "unit": "km",
+     "required": false,
+     "minimum": 0,
+     "description": "Distance along its edge from the edge's source node. Orders the edge's components in its series table (edge.open); left out, they keep the binding's order."
+    },
+    "kind": {
+     "type": "string",
+     "description": "liquefaction, landslide or fault: which mechanism, and so which hazard function the assembly binds to the row (by where)."
+    },
+    "road_class": {
+     "type": "string",
+     "description": "Hazus roadway class, HRD1 (major road) or HRD2 (other road); selects the roadway fragility on PGD."
+    },
+    "length_km": {
+     "type": "number",
+     "unit": "km",
+     "minimum": 0,
+     "required": false,
+     "description": "Length of the exposed stretch (0 for a fault crossing)."
+    },
+    "x0": {
+     "type": "number",
+     "required": false,
+     "description": "Site term of the occurrence model, its logit without the shaking terms: Zhu et al. (2017) for liquefaction, Nowicki Jessee et al. (2018, USGS 'slim' form) for landslides."
+    },
+    "liq_class": {
+     "type": "string",
+     "required": false,
+     "description": "Hazus liquefaction susceptibility class: vh, h, m, l or vl. Sets the triggering PGA and the settlement."
+    },
+    "dw_km": {
+     "type": "number",
+     "unit": "km",
+     "minimum": 0,
+     "required": false,
+     "description": "Distance from a liquefaction stretch to water (river, canal, lake or coast), its stations' mean. Stands in for the distance to a free face: whether Hazus lateral spread applies."
+    },
+    "slope_deg": {
+     "type": "number",
+     "unit": "deg",
+     "required": false,
+     "description": "Slope of the hillside at the stretch, as the landslide model reads it."
+    },
+    "ac_g": {
+     "type": "number",
+     "unit": "g",
+     "required": false,
+     "description": "Critical (yield) acceleration of the slope for Newmark sliding."
+    },
+    "slip_type": {
+     "type": "string",
+     "required": false,
+     "description": "Slip type of the crossed fault, as its catalogue gives it."
+    },
+    "fault_id": {
+     "type": "string",
+     "required": false,
+     "description": "The crossed fault's catalogue id."
+    }
+   }
+  },
+  {
+   "id": "Support",
+   "label": "Support route",
+   "description": "A destination and a source of support for it: a system function judges whether the destination can still be reached from that source, or, with no source, from any key destination. One row per (destination, source) pair gives one system layer per source.",
+   "attributes": {
+    "origin": {
+     "ref": "Node",
+     "description": "The node to be reached (a destination)."
+    },
+    "source": {
+     "ref": "Node",
+     "required": false,
+     "description": "The node support comes from; left out for 'any source': reachable from at least one node marked key_destination."
+    }
+   }
   },
   {
    "id": "SystemEvent",
@@ -633,7 +815,7 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
     {
      "key": "edge.open",
      "function": "edge.open",
-     "label": "Edge open unless a bridge on it is damaged to a closing state",
+     "label": "Edge open unless a bridge or a ground-failure component on it closes it",
      "role": "edge",
      "per": "Edge",
      "inputs": [
@@ -648,6 +830,51 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
        ],
        "template": "damage_scale",
        "kind": "reverse"
+      },
+      {
+       "name": "liquefaction",
+       "quantity": "RoadOpen.Liquefaction",
+       "over": "GroundFailure",
+       "via": "GroundFailure.edge",
+       "where": {
+        "kind": "liquefaction"
+       },
+       "description": "The road state at every liquefaction component on this edge.",
+       "choices": [
+        "RoadOpen.Liquefaction"
+       ],
+       "template": null,
+       "kind": "reverse"
+      },
+      {
+       "name": "landslide",
+       "quantity": "RoadOpen.Landslide",
+       "over": "GroundFailure",
+       "via": "GroundFailure.edge",
+       "where": {
+        "kind": "landslide"
+       },
+       "description": "The road state at every landslide component on this edge.",
+       "choices": [
+        "RoadOpen.Landslide"
+       ],
+       "template": null,
+       "kind": "reverse"
+      },
+      {
+       "name": "fault",
+       "quantity": "RoadOpen.FaultRupture",
+       "over": "GroundFailure",
+       "via": "GroundFailure.edge",
+       "where": {
+        "kind": "fault"
+       },
+       "description": "The road state at every fault crossing on this edge.",
+       "choices": [
+        "RoadOpen.FaultRupture"
+       ],
+       "template": null,
+       "kind": "reverse"
       }
      ],
      "outputs": [
@@ -661,7 +888,10 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
       }
      ],
      "attributes": [],
-     "tables": [],
+     "tables": [
+      "Bridge",
+      "GroundFailure"
+     ],
      "has_parameters": true,
      "implementation": "src.builder.kernels.edge:EdgeOpen",
      "deterministic": true,
@@ -670,7 +900,7 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
       "SampleForward",
       "EvaluateLikelihood"
      ],
-     "description": "Each bridge sits on one edge (Bridge.edge). The edge is open only if every bridge on it is in a damage state its closure policy keeps open, the parameter set's usable_states; an edge with no bridge is always open, as only bridges are fragile in this library. A roadway fragility would add a second input here.",
+     "description": "Each bridge and each ground-failure component sits on one edge. The edge is open only if every bridge on it is in a damage state its closure policy keeps open and the road stays open at every ground-failure component on it, whatever its mechanism: they act in series. The CPT is a composite-state table (Byun & Song 2021): with the components in road order (chainage_km, read from the Bridge and GroundFailure tables; the binding's order where a component has none), row i says the first i-1 are open, the i-th is closed and the rest are in any state (edge closed), and the last row says every one is open (edge open): n + 1 disjoint rows for n components, instead of one row per combination of their states. Bind it to the edges that can close (where fixed_open is false); an edge that cannot is not a random variable.",
      "parameter_sets": [
       {
        "id": "policy.closed-at-extensive",
@@ -877,6 +1107,254 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
      "n_parameter_sets": 28
     },
     {
+     "key": "fragility.road",
+     "function": "fragility.road",
+     "label": "Roadway fragility on permanent ground displacement",
+     "role": "fragility",
+     "per": "GroundFailure",
+     "inputs": [
+      {
+       "name": "pgd",
+       "quantity": "{pgd}",
+       "over": "GroundFailure",
+       "via": "self",
+       "description": "The component's permanent ground displacement, in m, from its own mechanism.",
+       "choices": [
+        "PGD.Liquefaction",
+        "PGD.Landslide",
+        "PGD.FaultOffset"
+       ],
+       "template": "pgd",
+       "kind": "self"
+      }
+     ],
+     "outputs": [
+      {
+       "name": "open",
+       "quantity": "{open}",
+       "description": "Whether the road stays open at the component, on its mechanism's quantity.",
+       "choices": [
+        "RoadOpen.Liquefaction",
+        "RoadOpen.Landslide",
+        "RoadOpen.FaultRupture"
+       ],
+       "template": "open"
+      }
+     ],
+     "attributes": [],
+     "tables": [],
+     "has_parameters": true,
+     "implementation": "src.builder.kernels.ground:RoadFragility",
+     "deterministic": false,
+     "drawKind": "Marginal",
+     "capabilities": [
+      "SampleForward",
+      "EvaluateLikelihood"
+     ],
+     "description": "P(road closed | PGD) = Phi(ln(PGD / median) / beta) for the closing state; 0 at PGD = 0. The parameter set is chosen by the row's kind and road_class: a Hazus HRD1 or HRD2 curve on that mechanism's quantities (hazus61.road.{kind}.{road_class}), or a curve of its own, e.g. for fault offset (road.fault-offset.{road_class}).",
+     "parameter_sets": [
+      {
+       "id": "hazus61.road.liquefaction.HRD1",
+       "label": "Hazus 6.1 major road (HRD1) on liquefaction PGD, closed at Extensive/Complete",
+       "count": null
+      },
+      {
+       "id": "hazus61.road.liquefaction.HRD2",
+       "label": "Hazus 6.1 urban road (HRD2) on liquefaction PGD, closed at Extensive/Complete",
+       "count": null
+      },
+      {
+       "id": "hazus61.road.landslide.HRD1",
+       "label": "Hazus 6.1 major road (HRD1) on landslide PGD, closed at Extensive/Complete",
+       "count": null
+      },
+      {
+       "id": "hazus61.road.landslide.HRD2",
+       "label": "Hazus 6.1 urban road (HRD2) on landslide PGD, closed at Extensive/Complete",
+       "count": null
+      },
+      {
+       "id": "hazus61.road.fault.HRD1",
+       "label": "Hazus 6.1 major road (HRD1) on fault PGD, closed at Extensive/Complete",
+       "count": null
+      },
+      {
+       "id": "hazus61.road.fault.HRD2",
+       "label": "Hazus 6.1 urban road (HRD2) on fault PGD, closed at Extensive/Complete",
+       "count": null
+      },
+      {
+       "id": "road.fault-offset.HRD1",
+       "label": "Road on fault offset, major road (HRD1): impassable within 72 h, median 4.5 m",
+       "count": null
+      },
+      {
+       "id": "road.fault-offset.HRD2",
+       "label": "Road on fault offset, other road (HRD2): impassable within 72 h, median 4.5 m",
+       "count": null
+      }
+     ],
+     "n_parameter_sets": 8
+    },
+    {
+     "key": "groundfailure.landslide",
+     "function": "groundfailure.landslide",
+     "label": "Landslide: how far the slope slides (0 where it holds)",
+     "role": "hazard",
+     "per": "GroundFailure",
+     "inputs": [
+      {
+       "name": "pgv",
+       "quantity": "PGV",
+       "over": "GroundFailure",
+       "via": "self",
+       "description": "PGV at the component, in cm/s: the shaking the occurrence model reads.",
+       "choices": [
+        "PGV"
+       ],
+       "template": null,
+       "kind": "self"
+      },
+      {
+       "name": "pga",
+       "quantity": "PGA",
+       "over": "GroundFailure",
+       "via": "self",
+       "description": "PGA at the component, in g: below the model's floor the ground does not fail.",
+       "choices": [
+        "PGA"
+       ],
+       "template": null,
+       "kind": "self"
+      }
+     ],
+     "outputs": [
+      {
+       "name": "pgd",
+       "quantity": "PGD.Landslide",
+       "choices": [
+        "PGD.Landslide"
+       ],
+       "template": null
+      }
+     ],
+     "attributes": [
+      "x0",
+      "slope_deg",
+      "length_km",
+      "ac_g"
+     ],
+     "tables": [],
+     "has_parameters": true,
+     "implementation": "src.builder.kernels.ground:LandslidePGD",
+     "deterministic": false,
+     "drawKind": "Marginal",
+     "capabilities": [
+      "SampleForward",
+      "EvaluateLikelihood"
+     ],
+     "description": "PGD > 0 only if the slope fails and slides: the slope fails with P = 1 - (1 - f)^(L / patch), f = Nowicki Jessee et al. (2018)'s areal coverage at x0 + b_pgv ln PGV' + b_int ln PGV' x slope, PGV' = min(PGV, clip), 0 below its PGA floor; it slides only where r = ac / PGA < 1 (Newmark). Given both, log10 PGD(cm) ~ N(c1 + log10((1 - r)^c2 r^c3), sigma_log10), r floored at ratio_min (Jibson 2007 Eq. 6). Else PGD = 0. Occurrence (the ground moved) is the event PGD > 0.",
+     "parameter_sets": [],
+     "n_parameter_sets": 0
+    },
+    {
+     "key": "groundfailure.liquefaction",
+     "function": "groundfailure.liquefaction",
+     "label": "Liquefaction: how far the ground moves (0 where it does not liquefy)",
+     "role": "hazard",
+     "per": "GroundFailure",
+     "inputs": [
+      {
+       "name": "pgv",
+       "quantity": "PGV",
+       "over": "GroundFailure",
+       "via": "self",
+       "description": "PGV at the component, in cm/s: the shaking the occurrence model reads.",
+       "choices": [
+        "PGV"
+       ],
+       "template": null,
+       "kind": "self"
+      },
+      {
+       "name": "pga",
+       "quantity": "PGA",
+       "over": "GroundFailure",
+       "via": "self",
+       "description": "PGA at the component, in g: below the model's floor the ground does not fail.",
+       "choices": [
+        "PGA"
+       ],
+       "template": null,
+       "kind": "self"
+      }
+     ],
+     "outputs": [
+      {
+       "name": "pgd",
+       "quantity": "PGD.Liquefaction",
+       "choices": [
+        "PGD.Liquefaction"
+       ],
+       "template": null
+      }
+     ],
+     "attributes": [
+      "x0",
+      "length_km",
+      "liq_class",
+      "dw_km"
+     ],
+     "tables": [],
+     "has_parameters": true,
+     "implementation": "src.builder.kernels.ground:LiquefactionPGD",
+     "deterministic": false,
+     "drawKind": "Marginal",
+     "capabilities": [
+      "SampleForward",
+      "EvaluateLikelihood"
+     ],
+     "description": "PGD = 0 with probability 1 - P, P = P(liquefies) = 1 - (1 - f)^(L / patch), f = Zhu et al. (2017)'s areal coverage at x0 + b_pgv ln(min(PGV, clip) MSF(M)), MSF = 1 / (1 + exp(-2 (M - 6))), M the ShakeMap's magnitude, 0 below its PGV and PGA floors (patches of length 'patch' along the stretch taken as independent). Given it liquefies, PGD = the larger of the Hazus lateral spread, K_delta(M) a(PGA / PGA_t) inches (a = 12r - 12, 18r - 24, 70r - 180 over r = PGA / PGA_t in (1, 2], (2, 3], > 3; 0 for r <= 1), and the class's settlement: a fixed value given PGA. Where the model sets lateral_spread_within_km and the stretch is farther than that from water (dw_km), it has no free face and only settles. Occurrence is the event PGD > 0.",
+     "parameter_sets": [],
+     "n_parameter_sets": 0
+    },
+    {
+     "key": "hazard.fault-rupture",
+     "function": "hazard.fault-rupture",
+     "label": "Fault crossing: how far the road is offset (0 without surface rupture)",
+     "role": "hazard",
+     "per": "GroundFailure",
+     "inputs": [],
+     "outputs": [
+      {
+       "name": "pgd",
+       "quantity": "PGD.FaultOffset",
+       "choices": [
+        "PGD.FaultOffset"
+       ],
+       "template": null
+      }
+     ],
+     "attributes": [
+      "lat",
+      "lon",
+      "slip_type",
+      "fault_id"
+     ],
+     "tables": [],
+     "has_parameters": true,
+     "implementation": "src.builder.kernels.ground:FaultPGD",
+     "deterministic": false,
+     "drawKind": "Marginal",
+     "capabilities": [
+      "SampleForward",
+      "EvaluateLikelihood"
+     ],
+     "description": "A root. The crossing is on the scenario's rupture if it lies within on_rupture_km of the top edge of the ShakeMap's rupture model; there the fault ruptures to the surface with P = 1 / (1 + exp(-(a + b M))), elsewhere with P = 0. Given surface rupture, PGD is lognormal about the offset at the trace: on_trace_fraction times the segment's average offset. The average is the scenario's measured one for the crossed fault's segment where segment_offsets gives it (by the row's fault_id), with its sigma_ln; else the Wells & Coppersmith (1994) average displacement for M (strike-slip where the fault's slip type is sinistral or dextral, else all slip types), with theirs. Else PGD = 0. Occurrence is the event PGD > 0.",
+     "parameter_sets": [],
+     "n_parameter_sets": 0
+    },
+    {
      "key": "hazard.gmm",
      "function": "hazard.gmm",
      "label": "Ground-motion model",
@@ -927,6 +1405,44 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
       }
      ],
      "n_parameter_sets": 2
+    },
+    {
+     "key": "hazard.shakemap.ground",
+     "function": "hazard.shakemap.ground",
+     "label": "USGS ShakeMap: ln IM at the ground-failure components as a Gaussian field",
+     "role": "hazard",
+     "per": "GroundFailure",
+     "inputs": [],
+     "outputs": [
+      {
+       "name": "im",
+       "quantity": "{imt}",
+       "choices": [
+        "PGA",
+        "PGV",
+        "SA(0.3)",
+        "SA(1.0)",
+        "SA(3.0)"
+       ],
+       "template": "imt"
+      }
+     ],
+     "attributes": [
+      "lat",
+      "lon"
+     ],
+     "tables": [],
+     "has_parameters": true,
+     "implementation": "src.builder.kernels.hazard:ShakeMap",
+     "deterministic": false,
+     "drawKind": "Joint",
+     "capabilities": [
+      "SampleForward",
+      "EvaluateLikelihood"
+     ],
+     "description": "hazard.shakemap on the GroundFailure plate: ln IM at each component from grid.xml and uncertainty.xml, one Gaussian field over the bound rows, correlated by the binding's set. The ground-failure functions read PGV (occurrence) and PGA (displacement), so an assembly binds it twice, once per IM. The two fields, and these and the bridges' field, are independent of each other: a simplification, as the IMs at one site are correlated.",
+     "parameter_sets": [],
+     "n_parameter_sets": 0
     },
     {
      "key": "hazard.shakemap",
@@ -1018,6 +1534,62 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
      "n_parameter_sets": 1
     },
     {
+     "key": "system.reachable",
+     "function": "system.reachable",
+     "label": "Destination reachable from its source",
+     "role": "system",
+     "per": "Support",
+     "inputs": [
+      {
+       "name": "open",
+       "quantity": "EdgeOpen",
+       "over": "Edge",
+       "via": "*",
+       "description": "Every random edge's state; an edge that cannot close (fixed_open) is in the graph, always open, but not a parent.",
+       "where": {
+        "fixed_open": [
+         false,
+         null
+        ]
+       },
+       "choices": [
+        "EdgeOpen"
+       ],
+       "template": null,
+       "kind": "all"
+      }
+     ],
+     "outputs": [
+      {
+       "name": "state",
+       "quantity": "SystemState",
+       "description": "Survival if the row's origin is connected by open edges, whatever the detour, to its source, or with no source to any key destination; else Fail.",
+       "choices": [
+        "SystemState"
+       ],
+       "template": null
+      }
+     ],
+     "attributes": [
+      "origin"
+     ],
+     "tables": [
+      "Node",
+      "Edge"
+     ],
+     "has_parameters": false,
+     "implementation": "src.builder.kernels.system:Reachable",
+     "deterministic": true,
+     "drawKind": "Joint",
+     "capabilities": [
+      "SampleForward",
+      "EvaluateLikelihood"
+     ],
+     "description": "For each Support row, whether its origin is still connected to its source (or, for a row without one, to at least one key destination) over the open edges, regardless of travel time. Edges that cannot close are part of the graph and always open. One binding per source (where source = ...) gives one system layer per source; a binding where source is null gives the any-source layer.",
+     "parameter_sets": [],
+     "n_parameter_sets": 0
+    },
+    {
      "key": "system.travel-time-to-nearest",
      "function": "system.travel-time-to-nearest",
      "label": "Reaches the nearest key destination in time",
@@ -1079,6 +1651,36 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
      "parents": null
     },
     {
+     "from": "fragility.road",
+     "out": "open",
+     "to": "edge.open",
+     "in": "liquefaction",
+     "quantity": "RoadOpen.Liquefaction",
+     "via": "GroundFailure.edge",
+     "kind": "reverse",
+     "parents": null
+    },
+    {
+     "from": "fragility.road",
+     "out": "open",
+     "to": "edge.open",
+     "in": "landslide",
+     "quantity": "RoadOpen.Landslide",
+     "via": "GroundFailure.edge",
+     "kind": "reverse",
+     "parents": null
+    },
+    {
+     "from": "fragility.road",
+     "out": "open",
+     "to": "edge.open",
+     "in": "fault",
+     "quantity": "RoadOpen.FaultRupture",
+     "via": "GroundFailure.edge",
+     "kind": "reverse",
+     "parents": null
+    },
+    {
      "from": "hazard.gmm",
      "out": "im",
      "to": "fragility.bridge",
@@ -1094,6 +1696,76 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
      "to": "fragility.bridge",
      "in": "im",
      "quantity": "{imt}",
+     "via": "self",
+     "kind": "self",
+     "parents": null
+    },
+    {
+     "from": "groundfailure.landslide",
+     "out": "pgd",
+     "to": "fragility.road",
+     "in": "pgd",
+     "quantity": "{pgd}",
+     "via": "self",
+     "kind": "self",
+     "parents": null
+    },
+    {
+     "from": "groundfailure.liquefaction",
+     "out": "pgd",
+     "to": "fragility.road",
+     "in": "pgd",
+     "quantity": "{pgd}",
+     "via": "self",
+     "kind": "self",
+     "parents": null
+    },
+    {
+     "from": "hazard.fault-rupture",
+     "out": "pgd",
+     "to": "fragility.road",
+     "in": "pgd",
+     "quantity": "{pgd}",
+     "via": "self",
+     "kind": "self",
+     "parents": null
+    },
+    {
+     "from": "hazard.shakemap.ground",
+     "out": "im",
+     "to": "groundfailure.landslide",
+     "in": "pgv",
+     "quantity": "PGV",
+     "via": "self",
+     "kind": "self",
+     "parents": null
+    },
+    {
+     "from": "hazard.shakemap.ground",
+     "out": "im",
+     "to": "groundfailure.landslide",
+     "in": "pga",
+     "quantity": "PGA",
+     "via": "self",
+     "kind": "self",
+     "parents": null
+    },
+    {
+     "from": "hazard.shakemap.ground",
+     "out": "im",
+     "to": "groundfailure.liquefaction",
+     "in": "pgv",
+     "quantity": "PGV",
+     "via": "self",
+     "kind": "self",
+     "parents": null
+    },
+    {
+     "from": "hazard.shakemap.ground",
+     "out": "im",
+     "to": "groundfailure.liquefaction",
+     "in": "pga",
+     "quantity": "PGA",
      "via": "self",
      "kind": "self",
      "parents": null
@@ -1116,6 +1788,16 @@ function diagramNavigation(viewport, { get, set, fit, ignoreDrag = () => false, 
      "quantity": "{imt}",
      "via": "self",
      "kind": "self",
+     "parents": null
+    },
+    {
+     "from": "edge.open",
+     "out": "open",
+     "to": "system.reachable",
+     "in": "open",
+     "quantity": "EdgeOpen",
+     "via": "*",
+     "kind": "all",
      "parents": null
     },
     {

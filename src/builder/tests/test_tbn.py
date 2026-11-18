@@ -89,9 +89,10 @@ def test_every_object_is_a_tbnpy_probability_that_reads_as_its_distribution(mode
     assert all(isinstance(p, tbnpy.Probability) for p in probs.values())
     assert repr(probs["DamageState.HazusBridge::b4"]).startswith(
         "Fragility(P(DamageState.HazusBridge::b4 | SA(1.0)::b4): P(DS >= k) = Phi(ln(SA(1.0)::b4 / median_k)")
-    assert repr(probs["EdgeOpen::e4"]) == ("EdgeOpen(P(EdgeOpen::e4 | DamageState.HazusBridge::b4): True if "
-                                           "DamageState.HazusBridge::b4 is none, slight, moderate, else False "
+    assert repr(probs["EdgeOpen::e4"]) == ("EdgeOpen(P(EdgeOpen::e4 | DamageState.HazusBridge::b4): series system "
+                                           "of 1 component in road order: table of 2 rows (composite states) "
                                            "[policy.closed-at-extensive])")
+    assert str(probs["EdgeOpen::e4"]).count("{none, slight, moderate}") == 1     # the open row's bridge cell
     assert "object at 0x" not in repr(probs)
     assert "rules: " in str(probs["SystemState::n4"])
     assert "note: hazard.gmm draws each Bridge's ln IM independently" in str(probs["hazard.gmm"])

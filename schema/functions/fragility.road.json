@@ -1,0 +1,86 @@
+{
+  "$schema": "../meta/function.schema.json",
+  "id": "fragility.road",
+  "label": "Roadway fragility on permanent ground displacement",
+  "version": "0.3.0",
+  "role": "fragility",
+  "per": "GroundFailure",
+  "inputs": [
+    {
+      "name": "pgd",
+      "quantity": "{pgd}",
+      "over": "GroundFailure",
+      "via": "self",
+      "description": "The component's permanent ground displacement, in m, from its own mechanism."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "open",
+      "quantity": "{open}",
+      "description": "Whether the road stays open at the component, on its mechanism's quantity."
+    }
+  ],
+  "instance_schema": {
+    "type": "object",
+    "required": [
+      "pgd",
+      "open",
+      "closing_state",
+      "median_m",
+      "beta"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "pgd": {
+        "enum": [
+          "PGD.Liquefaction",
+          "PGD.Landslide",
+          "PGD.FaultOffset"
+        ],
+        "description": "The displacement quantity the curve reads."
+      },
+      "open": {
+        "enum": [
+          "RoadOpen.Liquefaction",
+          "RoadOpen.Landslide",
+          "RoadOpen.FaultRupture"
+        ],
+        "description": "The road-state quantity it gives."
+      },
+      "closing_state": {
+        "enum": [
+          "slight",
+          "moderate",
+          "extensive",
+          "impassable"
+        ],
+        "description": "The damage state at or above which the road counts as closed: a Hazus roadway state, or impassable for a curve fitted directly to whether traffic could pass."
+      },
+      "median_m": {
+        "type": "number",
+        "exclusiveMinimum": 0
+      },
+      "beta": {
+        "type": "number",
+        "exclusiveMinimum": 0
+      },
+      "window_h": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "The hours after the shock that closed refers to (e.g. 72 for the relief window), where the curve was fitted to closures over a stated time; left out for a Hazus damage-state curve."
+      }
+    }
+  },
+  "implementation": "src.builder.kernels.ground:RoadFragility",
+  "deterministic": false,
+  "drawKind": "Marginal",
+  "capabilities": [
+    "SampleForward",
+    "EvaluateLikelihood"
+  ],
+  "source": {
+    "note": "Each parameter set cites its curve."
+  },
+  "description": "P(road closed | PGD) = Phi(ln(PGD / median) / beta) for the closing state; 0 at PGD = 0. The parameter set is chosen by the row's kind and road_class: a Hazus HRD1 or HRD2 curve on that mechanism's quantities (hazus61.road.{kind}.{road_class}), or a curve of its own, e.g. for fault offset (road.fault-offset.{road_class})."
+}

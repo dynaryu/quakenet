@@ -1,4 +1,5 @@
-"""Every test writes its query records to a scratch folder, never to the repository's records/."""
+"""Every test writes its query records to a scratch folder, never to the repository's records/, and rewrites
+no stored rsr rules."""
 
 import pytest
 
@@ -6,6 +7,12 @@ import pytest
 @pytest.fixture(autouse=True)
 def _records_in_scratch(tmp_path, monkeypatch):
     monkeypatch.setenv("QUAKENET_RECORDS", str(tmp_path / "records"))
+
+
+@pytest.fixture(autouse=True)
+def _rules_not_saved(monkeypatch):
+    """Rules a test learns stay in memory: the examples' stored rsr rules are never rewritten by a test run."""
+    monkeypatch.setenv("QUAKENET_SAVE_RULES", "0")
 
 
 @pytest.fixture(autouse=True)

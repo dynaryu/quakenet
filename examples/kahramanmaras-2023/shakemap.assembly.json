@@ -1,0 +1,251 @@
+{
+  "$schema": "../../schema/meta/assembly.schema.json",
+  "id": "kahramanmaras-2023/shakemap",
+  "label": "Kahramanmaraş: bridges and ground failure under a USGS ShakeMap, support from each source",
+  "network": "kahramanmaras-2023",
+  "description": "The scenario ShakeMap (the M7.8 Pazarcık main shock by default; choose another on the page) gives SA(1.0) at the bridges and PGV and PGA at the liquefaction and landslide components. Bridges fail by Hazus fragility. Each ground-failure mechanism is its own chain: whether it occurs, then the permanent ground displacement (PGD), then whether the road stays open by the Hazus roadway curve. An edge is open only if its bridge and its ground-failure components all are; edges with nothing that can fail are in the graph but not variables. Each town has one system state per source, and one for any source: whether it is still connected to it. Sampling fetches the map (about 30 MB) unless it is cached.",
+  "bindings": [
+    {
+      "function": "hazard.shakemap",
+      "parameters": {
+        "event_id": "us6000jllz",
+        "imt": "SA(1.0)",
+        "version": null,
+        "source": null
+      },
+      "correlation": "jayaram-baker-2009.sa1p0",
+      "note": "ln SA(1.0) at the bridges, one Gaussian field correlated by Jayaram & Baker (2009)."
+    },
+    {
+      "function": "fragility.bridge",
+      "parameter_set": "hazus61.{hazus_class}"
+    },
+    {
+      "function": "hazard.shakemap.ground",
+      "where": {
+        "kind": [
+          "liquefaction",
+          "landslide"
+        ]
+      },
+      "parameters": {
+        "event_id": "us6000jllz",
+        "imt": "PGV",
+        "version": null,
+        "source": null
+      },
+      "correlation": "jayaram-baker-2009.sa1p0",
+      "note": "ln PGV at the liquefaction and landslide components: what decides whether the ground fails. Jayaram & Baker (2009) have no PGV set; their 1.0 s range stands in."
+    },
+    {
+      "function": "hazard.shakemap.ground",
+      "where": {
+        "kind": [
+          "liquefaction",
+          "landslide"
+        ]
+      },
+      "parameters": {
+        "event_id": "us6000jllz",
+        "imt": "PGA",
+        "version": null,
+        "source": null
+      },
+      "correlation": "jayaram-baker-2009.pga",
+      "note": "ln PGA at the same components: what decides how far the ground moves. Independent of the PGV field (a simplification)."
+    },
+    {
+      "function": "groundfailure.liquefaction",
+      "where": {
+        "kind": "liquefaction"
+      },
+      "parameters": {
+        "event_id": "us6000jllz",
+        "version": null,
+        "source": null,
+        "model": {
+          "zhu2017": {
+            "b_pgv": 0.334,
+            "coverage": [
+              0.4915,
+              42.4,
+              9.165
+            ],
+            "pgv_min_cms": 3.0,
+            "pga_min_g": 0.1,
+            "pgv_clip_cms": 150.0
+          },
+          "patch_m": 100.0,
+          "hazus": {
+            "pga_threshold_g": {
+              "vh": 0.09,
+              "h": 0.12,
+              "m": 0.15,
+              "l": 0.21,
+              "vl": 0.26
+            },
+            "settlement_in": {
+              "vh": 12.0,
+              "h": 6.0,
+              "m": 2.0,
+              "l": 1.0,
+              "vl": 0.0
+            },
+            "kdelta": [
+              0.0086,
+              -0.0914,
+              0.4698,
+              -0.9835
+            ]
+          },
+          "lateral_spread_within_km": 0.2
+        }
+      },
+      "note": "Whether the stretch liquefies: Zhu et al. (2017) coverage (USGS gfail zhu_2017.py, commit fa7bd28), over 100 m patches taken as independent. Given it occurs: PGD given liquefaction: Hazus lateral spread and settlement, the larger, lateral spread only within 200 m of water (a free face; dw_km standing in for it), settlement only farther (OpenQuake openquake/sep/liquefaction, commit 0f9c75e); 0 where it does not liquefy."
+    },
+    {
+      "function": "groundfailure.landslide",
+      "where": {
+        "kind": "landslide"
+      },
+      "parameters": {
+        "model": {
+          "jessee2018": {
+            "b_pgv": 1.65,
+            "b_int": 0.01,
+            "coverage": [
+              -7.592,
+              5.237,
+              -3.042,
+              4.035
+            ],
+            "pga_min_g": 0.02,
+            "pgv_clip_cms": 211.0
+          },
+          "patch_m": 100.0,
+          "jibson2007": {
+            "c1": 0.215,
+            "c2": 2.341,
+            "c3": -1.438,
+            "sigma_log10": 0.51,
+            "ratio_min": 0.05
+          }
+        }
+      },
+      "note": "Whether the slope fails: Nowicki Jessee et al. (2018) coverage (USGS gfail jessee_2018.py and jessee_2018_slim.py, commit fa7bd28), over 100 m patches. Given it occurs: PGD given a slide: Jibson (2007) Eq. 6 Newmark displacement (OpenQuake openquake/sep/landslide/displacement.py, commit 0f9c75e); 0 where it does not slide."
+    },
+    {
+      "function": "hazard.fault-rupture",
+      "where": {
+        "kind": "fault"
+      },
+      "parameters": {
+        "event_id": "us6000jllz",
+        "version": null,
+        "source": null,
+        "model": {
+          "on_rupture_km": 2.0,
+          "p_surface_rupture": {
+            "a": -12.51,
+            "b": 2.053
+          },
+          "average_displacement": {
+            "strike-slip": {
+              "a": -6.32,
+              "b": 0.9,
+              "sigma_log10": 0.28
+            },
+            "all": {
+              "a": -4.8,
+              "b": 0.69,
+              "sigma_log10": 0.36
+            }
+          },
+          "on_trace_fraction": 0.8,
+          "segment_offsets": {
+            "us6000jllz": {
+              "source": "Provost et al. (2024), Sentinel-2 and field offsets of the 2023 ruptures: segment averages as a review of this example quotes them; not checked against the paper",
+              "sigma_ln": 0.3,
+              "faults": {
+                "ME_TRCS056": {
+                  "segment": "Amanos",
+                  "average_m": 3.8
+                },
+                "ME_TRCS055": {
+                  "segment": "Pazarcık",
+                  "average_m": 6.0
+                },
+                "ME_TRCS062": {
+                  "segment": "Erkenek",
+                  "average_m": 5.3
+                }
+              }
+            }
+          }
+        }
+      },
+      "note": "Whether the fault ruptures to the surface at the crossing: on the ShakeMap rupture.json's top edge (within 2 km), with Wells & Coppersmith (1993) P(surface rupture) (coefficients not checked against the paper). Given it occurs: the offset at the trace, 0.8 of the segment's average (the rest spread off the trace). For the M7.8 the average is the segment's measured one (Provost et al. 2024, as quoted in a review; not checked): Amanos 3.8 m, Pazarcık 6.0 m, Erkenek 5.3 m, by the crossed GEM fault; elsewhere, and for any other event, the Wells & Coppersmith (1994) Table 2B average displacement (checked); 0 where it does not rupture."
+    },
+    {
+      "function": "fragility.road",
+      "where": {
+        "kind": "liquefaction"
+      },
+      "parameter_set": "hazus61.road.liquefaction.{road_class}"
+    },
+    {
+      "function": "fragility.road",
+      "where": {
+        "kind": "landslide"
+      },
+      "parameter_set": "hazus61.road.landslide.{road_class}"
+    },
+    {
+      "function": "fragility.road",
+      "where": {
+        "kind": "fault"
+      },
+      "parameter_set": "road.fault-offset.{road_class}",
+      "note": "A curve of its own for strike-slip offset (instances/fragility/road-fault-offset.json): impassable within 72 h, median 4.5 m, beta 0.7, fitted roughly to the 2023 crossings; the Hazus roadway curve on PGD would close a road at about 1.5 m of any movement."
+    },
+    {
+      "function": "edge.open",
+      "where": {
+        "fixed_open": [
+          false,
+          null
+        ]
+      },
+      "parameter_set": "policy.closed-at-extensive",
+      "note": "Only the random edges (E...): an edge with nothing on it that can fail (C..., fixed_open) is in the graph but not a variable."
+    },
+    {
+      "function": "system.reachable",
+      "where": {
+        "source": "S1"
+      },
+      "note": "Whether each town is still connected to S1 (Adana) over open edges, whatever the detour."
+    },
+    {
+      "function": "system.reachable",
+      "where": {
+        "source": "S2"
+      },
+      "note": "Whether each town is still connected to S2 (Ceyhan) over open edges, whatever the detour."
+    },
+    {
+      "function": "system.reachable",
+      "where": {
+        "source": "S3"
+      },
+      "note": "Whether each town is still connected to S3 (Gaziantep) over open edges, whatever the detour."
+    },
+    {
+      "function": "system.reachable",
+      "where": {
+        "source": null
+      },
+      "note": "Whether each town is still connected to at least one source over open edges."
+    }
+  ]
+}

@@ -66,7 +66,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
-    from src.builder.bn_builder import generate_tbn
+    from src.builder.builders import generate_tbn
     from src.builder.load import assembly_path
 
     out = generate_tbn(assembly_path(args.assembly), extract_rules=not args.no_rules)
@@ -75,7 +75,8 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 
 def cmd_rules(args: argparse.Namespace) -> int:
-    from src.builder.bn_builder import compile_assembly, extract_system_rules, model_dir
+    from src.builder.bn_builder import compile_assembly, model_dir
+    from src.builder.builders import extract_system_rules
     from src.builder.load import (RegistryError, assembly_path, check_tables, load_assembly, load_library,
                                   load_network, rel)
 

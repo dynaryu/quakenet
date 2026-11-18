@@ -17,7 +17,8 @@ from pathlib import Path
 
 import torch
 
-from src.builder.bn_builder import build_tbn, compile_path
+from src.builder.bn_builder import compile_path
+from src.builder.builders import build_tbn
 from src.builder.kernels.hazard import correlation_matrix
 from src.inference import cliques, session
 

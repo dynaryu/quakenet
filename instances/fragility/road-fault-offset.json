@@ -1,0 +1,37 @@
+{
+  "$schema": "../../schema/meta/parameter-sets.schema.json",
+  "function": "fragility.road",
+  "source": {
+    "document": "Not a published curve: fitted by eye to the road closures at the 2023 Kahramanmaraş (M7.8) fault crossings",
+    "basis": "A review of the Kahramanmaraş example: roads offset about 3 m sideways by the strike-slip rupture mostly stayed usable or were patched within hours; of the eight fault-crossing edges with a known outcome about 3 closed. A road offset with median about 3 m (sigma 0.3 ln) through this curve gives P(closed) about 0.3. The Hazus roadway curves (Table 7-5) treat about 1.5 m of any ground movement as closing a major road, which suits vertical movement, not a mostly horizontal offset.",
+    "calibration": "One event, a handful of crossings: a rough fit, not a validated curve. Its outcomes are what it was fitted to, so they are no test of it.",
+    "window": "Closed means not passable for relief traffic within the first 72 hours after the shock. KGM reopened every road closed on 6 February 2023 by 10 February, so on a one-week window almost no fault crossing would count as closed.",
+    "application": "Every fault crossing, either road class (the evidence gives no difference between them). beta is the Hazus roadway beta, kept."
+  },
+  "sets": [
+    {
+      "id": "road.fault-offset.HRD1",
+      "label": "Road on fault offset, major road (HRD1): impassable within 72 h, median 4.5 m",
+      "values": {
+        "pgd": "PGD.FaultOffset",
+        "open": "RoadOpen.FaultRupture",
+        "closing_state": "impassable",
+        "window_h": 72,
+        "median_m": 4.5,
+        "beta": 0.7
+      }
+    },
+    {
+      "id": "road.fault-offset.HRD2",
+      "label": "Road on fault offset, other road (HRD2): impassable within 72 h, median 4.5 m",
+      "values": {
+        "pgd": "PGD.FaultOffset",
+        "open": "RoadOpen.FaultRupture",
+        "closing_state": "impassable",
+        "window_h": 72,
+        "median_m": 4.5,
+        "beta": 0.7
+      }
+    }
+  ]
+}

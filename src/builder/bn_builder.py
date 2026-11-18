@@ -15,6 +15,12 @@ Wiring is by quantity, so an output reaches an input only when the types agree,
 and every (quantity, row) must have exactly one producer: two hazard bindings
 over the same sites is an error, as is a fragility curve whose sites nobody
 shakes. The binding graph must be acyclic; that order is the sampling order.
+
+This module builds the networks of one bridge per edge under SA (toy-ca, EMA, Hebei): their kernels' arguments
+and their travel-time systems' rsr rules are written here. bn_builder_series.py builds the networks whose edges
+carry components in series (Kahramanmaraş) on the same compiler and spec writer, with the kernels and rules
+only they need; builders.py says which one takes an assembly, as src/inference/trees.py says which clique tree
+samples it.
 """
 
 from __future__ import annotations
@@ -106,6 +112,8 @@ class Compiled:
                         "function": b.function["id"],
                         "parameter_set": b.parameter_sets[r],
                         "parents": parents,
+                        "binding": i,
+                        "where": b.spec.get("where"),
                     })
         return out
 
@@ -305,6 +313,9 @@ def compile_assembly(assembly: dict[str, Any], lib: Library, network: Network) -
                     pids = [r["id"] for r in network.rows(over) if r.get(attr) == row["id"]]
                 else:
                     pids = [r["id"] for r in network.rows(over)]
+                if port.get("where"):                                   # this port reads only these parent rows
+                    rows_over = {r["id"]: r for r in network.rows(over)}
+                    pids = [pid for pid in pids if pid in rows_over and _matches(rows_over[pid], port["where"])]
                 for pid in pids:
                     source = producer.get((quantity, pid))
                     if source is None:
@@ -423,7 +434,8 @@ KERNEL_ARGUMENTS = {
 }
 
 
-def tbn_data(compiled: Compiled, bindings: set[int] | None = None) -> dict[str, Any]:
+def tbn_data(compiled: Compiled, bindings: set[int] | None = None,
+             kernels: dict[str, Callable] | None = None) -> dict[str, Any]:
     """The model as a tbnpy spec: its variables, and each probability object as a ``custom`` node.
 
     A node names the object's class (``module``, ``cls``), its ``childs`` and ``parents``,
@@ -439,7 +451,8 @@ def tbn_data(compiled: Compiled, bindings: set[int] | None = None) -> dict[str, 
     child with its own parents, as a Bayesian network has it: a bridge's damage depends on
     its own intensity, an origin's state on the edge states. ``bindings`` restricts the
     spec to those bindings, which must be closed under ``upstream``. The spec is a portable
-    snapshot of the selected inputs, not sampled data.
+    snapshot of the selected inputs, not sampled data. ``kernels``: the constructor arguments by
+    kernel, KERNEL_ARGUMENTS unless a family of networks has its own (bn_builder_series.py).
     """
     variables, nodes, parameter_sets = {}, [], {}
     lib = compiled.library
@@ -460,7 +473,7 @@ def tbn_data(compiled: Compiled, bindings: set[int] | None = None) -> dict[str, 
                 states[port["name"]] = lib.quantities[next(iter(used))]["states"]
         tables = {t: compiled.network.rows(t) for t in fn.get("tables", [])}
 
-        arguments = KERNEL_ARGUMENTS.get(fn["implementation"])
+        arguments = (KERNEL_ARGUMENTS if kernels is None else kernels).get(fn["implementation"])
         if arguments is None:
             raise ValueError(f"{fn['id']}: no constructor arguments are defined for {fn['implementation']}")
         module, cls = fn["implementation"].split(":")
@@ -740,7 +753,7 @@ def extract_system_rules(compiled: Compiled, directory: Path, origins: set[str] 
                 # the BN's component distribution or its hazard-induced dependence.
                 run_ref_extraction_by_mcs(
                     sfun=binary_system, probs=torch.full((len(edges), 2), 0.5),
-                    row_names=edges, n_state=2, sys_upper_st=1,
+                    row_names=edges, n_state=2, sys_upper_st=1, samples_store=False,
                     unk_prob_thres=RSR_UNKNOWN_TARGET, unk_prob_opt="abs", max_rounds=RSR_MAX_ROUNDS,
                     prob_update_every=10, save_every=128, n_sample=4096,
                     sample_batch_size=4096, max_search_loops=2,

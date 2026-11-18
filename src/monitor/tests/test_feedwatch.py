@@ -167,7 +167,7 @@ def test_the_module_imports_only_the_standard_library():
 
 def test_the_lambda_zip_carries_the_real_network_regions(tmp_path):
     regions = watch.regions()
-    assert set(regions) == {"ema-highway", "hebei-transport", "toy-ca"}
+    assert set(regions) == {"ema-highway", "hebei-transport", "kahramanmaras-2023", "toy-ca"}
     lon_min, lat_min, lon_max, lat_max = regions["hebei-transport"]
     assert lon_min < 115.0 < lon_max and lat_min < 37.5 < lat_max      # Xingtai
     lon_min, lat_min, lon_max, lat_max = regions["ema-highway"]

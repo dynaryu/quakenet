@@ -80,6 +80,69 @@
       ]
     },
     {
+      "id": "PGD.Liquefaction",
+      "label": "Permanent ground displacement: liquefaction",
+      "kind": "continuous",
+      "unit": "m",
+      "range": [
+        0,
+        null
+      ],
+      "description": "Permanent ground displacement from lateral spread or settlement: 0 where the stretch does not liquefy, so liquefaction occurs exactly when it is positive."
+    },
+    {
+      "id": "PGD.Landslide",
+      "label": "Permanent ground displacement: landslide",
+      "kind": "continuous",
+      "unit": "m",
+      "range": [
+        0,
+        null
+      ],
+      "description": "Permanent ground displacement from Newmark sliding of the slope: 0 where the slope holds or does not slide, so the ground moved exactly when it is positive."
+    },
+    {
+      "id": "PGD.FaultOffset",
+      "label": "Permanent ground displacement: fault crossing",
+      "kind": "continuous",
+      "unit": "m",
+      "range": [
+        0,
+        null
+      ],
+      "description": "Permanent ground displacement from the fault's offset: 0 without surface rupture, so the fault ruptured at the crossing exactly when it is positive."
+    },
+    {
+      "id": "RoadOpen.Liquefaction",
+      "label": "Road open at a liquefaction component",
+      "kind": "discrete",
+      "states": [
+        "False",
+        "True"
+      ],
+      "description": "Whether the road stays usable where the ground moved (liquefaction): False closed, True open. The edge is open only if every such component on it is."
+    },
+    {
+      "id": "RoadOpen.Landslide",
+      "label": "Road open at a landslide component",
+      "kind": "discrete",
+      "states": [
+        "False",
+        "True"
+      ],
+      "description": "Whether the road stays usable where the ground moved (landslide): False closed, True open. The edge is open only if every such component on it is."
+    },
+    {
+      "id": "RoadOpen.FaultRupture",
+      "label": "Road open at a fault crossing component",
+      "kind": "discrete",
+      "states": [
+        "False",
+        "True"
+      ],
+      "description": "Whether the road stays usable where the ground moved (fault crossing): False closed, True open. The edge is open only if every such component on it is."
+    },
+    {
       "id": "EdgeOpen",
       "label": "Edge open to traffic",
       "kind": "discrete",

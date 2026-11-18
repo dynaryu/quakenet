@@ -41,8 +41,14 @@ used, so the app can read describe() without it.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import math
+import os
+import tempfile
 import time
+from pathlib import Path
 
 import torch
 from src.cancellation import check_cancelled
@@ -97,6 +103,70 @@ def root(kind, belief, does, toolkit=None):
 def describe():
     """The message passing as this module does it: the root, every message and the toolkits they use."""
     return {"root": _ROOT, "messages": _MESSAGES, "kinds": KINDS, "toolkits": TOOLKITS}
+
+
+# ---- the tree as the app draws it ---------------------------------------------------------------------
+#
+# drawing() gives the Clique tree tab this module's tree for a BN, from its nodes ({"id", "row", "function",
+# "parents"}, as compiled.nodes() gives them): every clique's members, the separator it shares with the clique it
+# hangs off, its kind (the messages across that link, as describe() declares them) and the factors assigned to
+# it, each {"p": [child], "given": [parents]} for P(child | parents) or {"f": [system], "given": [edges]} for a
+# system's function. The app only draws it. cliques_series.drawing() is this with series edges.
+
+def _p(of, given=()):
+    return {"p": list(of), "given": list(given)}
+
+
+def _role(node):
+    return node["function"].split(".")[0]
+
+
+def _is_field(node):
+    """Whether the node is the shaking field's (SA, PGV, PGA at a site), not a ground-failure component's PGD."""
+    return node["function"].startswith(("hazard.shakemap", "hazard.gmm"))
+
+
+def _given(by, i):
+    """P(i | its parents), as the BN has it."""
+    return _p([i], by[i]["parents"])
+
+
+def _rest(nodes, local, comp=()):
+    """The cliques every tree has around its edges' (local) and components' (comp): one per measurement, hanging
+    off the clique that holds its intensity; the hub, every edge and every field; the clique of every edge alone,
+    between the hub and the systems; and one per system, the system and the edges it reads."""
+    obs = []
+    for n in nodes:
+        if _role(n) != "observation":
+            continue
+        im = n["parents"][0]
+        part = next((k for k, c in enumerate(comp) if im in c["members"]), -1)
+        edge = comp[part]["edge"] if part >= 0 else next((k for k, c in enumerate(local) if im in c["members"]), -1)
+        obs.append({"label": n["row"], "members": [im, n["id"]], "separator": [im], "edge": edge, "comp": part,
+                    "kind": "sa_obs", "factors": [_p([n["id"]], [im])]})
+    field = [n["id"] for n in nodes if _is_field(n)]           # a ground-failure chain sits in its component's clique
+    edges = [n["id"] for n in nodes if _role(n) == "edge"]
+    quantities = list(dict.fromkeys(f.split("::")[0] for f in field))
+    hub = {"members": edges + field, "kind": "sa_e",
+           "factors": [_p([f for f in field if f.split("::")[0] == q]) for q in quantities]}   # one Gaussian per field
+    systems = [{"label": n["row"], "members": n["parents"] + [n["id"]], "separator": n["parents"], "kind": "e_s",
+                "factors": [{"f": [n["id"]], "given": n["parents"]}]} for n in nodes if _role(n) == "system"]
+    return {"obs": obs, "comp": list(comp), "local": local, "hub": hub,
+            "edges": {"members": edges, "separator": edges, "kind": "e", "factors": ["no factor"]}, "systems": systems}
+
+
+def drawing(nodes, tables=None):
+    """The tree for the Clique tree tab: clique (SA_i, D_i, E_i) per edge, with P(D_i | SA_i) and P(E_i | D_i), and
+    the cliques around them (_rest). tables: unused here (an edge's table orders a series edge's components)."""
+    by, local = {n["id"]: n for n in nodes}, []
+    for n in nodes:
+        if _role(n) != "edge":
+            continue
+        (d,) = n["parents"]                                       # one bridge
+        sa = by[d]["parents"]
+        local.append({"label": n["row"], "members": sa + [d, n["id"]], "separator": sa + [n["id"]], "kind": "sa_d_e",
+                      "factors": [_given(by, d), _p([n["id"]], [d])]})
+    return _rest(nodes, local)
 
 
 # ---- the tree's pieces ----------------------------------------------------------------------------------
@@ -377,16 +447,129 @@ def system_up(t, k, ev):
 
 @message("e", "e_s", "m_down^E(E) = P(E | evidence)",
          ["sent as a sample of E", "---", "P(S | E, evidence) = δ(S − f(E)) if S is not in the evidence;",
-          "= δ(S − x) if it is;"], ["rsr_rules", "ndtools"])
-def system_down(t, k, e, ev):
-    """S_k for each E row (N, n), by the system kernel: the rules first, ndtools for the rows they
-    leave. An observed S_k keeps its value. Returns S_k (N,); n_ops = rows left to ndtools."""
+          "= δ(S − x) if it is;", "f(E) by the rsr rules: S = 1 in a survival box, 0 in a failure box"],
+         ["rsr_rules", "ndtools"])
+def system_down(t, k, e, ev, opened=None):
+    """S_k for each E row (N, n), by the system's rsr rules: a row in a box of the survival rules survives, one
+    in a box of the failure rules fails. An observed S_k keeps its value.
+
+    learn(): the rows no rule decides are learnt from first. rsr resolves them by the system function (ndtools)
+    into new reference states, keeping these rows as its samples, until every one is decided. The system keeps
+    the rules for later messages and, when they are its own (its rsr folder, at its own threshold), they are
+    written back there for the next round, unless QUAKENET_SAVE_RULES=0. Without stored rules, all rows are
+    learnt from.
+
+    opened (column indices of e): S_k for each row with each of those edges opened as well, (N, len(opened)), the
+    message under do(E_j = open), the rest of the row kept. A row whose edge j is already open keeps its state.
+    One that is closed is decided from its violations of each rule (the components whose state the rule does
+    not allow), which the rules' classification gives: opening j puts it in a rule's box if it already is in it
+    and the rule allows j open, or if j was its one violation and the rule needs j open. Two matrix products per
+    side decide every edge at once; the opened rows that no rule then decides are learnt from as above.
+
+    Returns S_k, (N,) or (N, len(opened)); n_ops = system function calls to learn."""
     name, prob = f"SystemState::{k}", t["systems"][k]
+    shape = (len(e),) if opened is None else (len(e), len(opened))
     if name in ev:
-        return torch.full((len(e),), ev[name]), 0
-    before = prob.tally["unclassified"]
-    s = prob.evaluate(e.double())[:, 0].long()
-    return s, prob.tally["unclassified"] - before
+        return torch.full(shape, ev[name], dtype=torch.long), 0
+    if not len(e):
+        return torch.zeros(shape, dtype=torch.long), 0
+    from rsr._checkpoint import save_json, save_tensor
+    from rsr.rsr import classify_samples_with_indices, run_ref_extraction_by_mcs
+
+    ref, folder = getattr(prob, "rules_reference", None), getattr(prob, "rules_directory", None)
+    own = bool(ref and folder is not None and ref.get("upper") and ref.get("lower")
+               and ref.get("upper_at") == ref.get("lower_at") == getattr(prob, "target_add_h", None))
+    files = {side: Path(folder) / ref[side] for side in ("upper", "lower")} if own else {}
+    empty = torch.empty((0, len(prob.edge_ids), 2), dtype=torch.int32)
+    n_ops = 0
+
+    def onehot(x):
+        return torch.nn.functional.one_hot(x.long(), 2).int()
+
+    def learn(rows):
+        """Extend the rules until they decide every one of rows (R, n); keep them, and store them if their own."""
+        nonlocal n_ops
+        rules = prob.rules if prob.rules is not None else (empty, empty)
+        r = classify_samples_with_indices(onehot(rows), *rules, return_masks=True)
+        prob.tally["unclassified"] += r["unknown"]
+        if not r["unknown"]:
+            return
+        check_cancelled()
+        save = own and os.environ.get("QUAKENET_SAVE_RULES", "1") != "0"
+        start = {"refs_upper": [], "refs_lower": [], "refs_mat_upper": rules[0], "refs_mat_lower": rules[1]}
+        if save:                                    # the stored rules: the .json references with the .pt tensors
+            start = {f"refs_{side}": json.loads(f.with_suffix(".json").read_text(encoding="utf-8"))
+                     for side, f in files.items()}
+            start.update({f"refs_mat_{side}": torch.load(f, map_location="cpu", weights_only=True).to(torch.int32)
+                          for side, f in files.items()})
+        f = prob.system_function()
+        with tempfile.TemporaryDirectory() as scratch, contextlib.redirect_stdout(io.StringIO()):
+            res = run_ref_extraction_by_mcs(
+                sfun=lambda comps: (f(comps)[1],) * 2 + (None,), probs=torch.full((len(prob.edge_ids), 2), 0.5),
+                row_names=list(prob.edge_ids), n_state=2, sys_upper_st=1, **start,
+                samples=rows.long()[r["mask_unknown"]], save_every=10 ** 9, ref_update_verbose=False,
+                output_dir=scratch)
+            mats = {side: torch.load(res[f"refs_{side}_pt_path"], map_location="cpu", weights_only=True).to(torch.int32)
+                    for side in ("upper", "lower")}
+            refs = {side: json.loads(Path(res[f"refs_{side}_path"]).read_text(encoding="utf-8"))
+                    for side in ("upper", "lower")}
+        prob.rules = (mats["upper"], mats["lower"])
+        calls = sum(m.get("n_sfun_upper", 0) + m.get("n_sfun_lower", 0) for m in res["metrics_log"])
+        n_ops += calls
+        if save:
+            for side, path in files.items():
+                save_json(refs[side], path.with_suffix(".json"))
+                save_tensor(mats[side], path)
+            meta_file = files["upper"].parent / "model.json"
+            if meta_file.is_file():
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                learnt = meta.get("learnt_from_samples") or {"rows": 0, "sfun_calls": 0}
+                meta["learnt_from_samples"] = {
+                    "how": "rows of a session's samples the rules left undecided, resolved by rsr (samples kept)",
+                    "rows": learnt["rows"] + int(r["unknown"]), "sfun_calls": learnt["sfun_calls"] + calls,
+                    "rules": {side: len(mats[side]) for side in ("upper", "lower")}}
+                save_json(meta, meta_file)
+
+    prob.tally["seen"] += len(e)
+    learn(e)
+    up, lo = prob.rules
+    if opened is None:
+        r = classify_samples_with_indices(onehot(e), up, lo, return_masks=True)
+        if r["unknown"]:
+            raise RuntimeError(f"{name}: {r['unknown']} rows left undecided after learning rules from them")
+        return r["mask_upper"].long(), n_ops
+
+    cols = torch.as_tensor(opened, dtype=torch.long)
+    # per rule and opened edge: does it allow the edge open; is the edge its one violation when closed
+    allows = {side: m[:, cols, 1].float() for side, m in (("upper", up), ("lower", lo))}
+    needs = {side: ((m[:, cols, 0] == 0) & (m[:, cols, 1] == 1)).float() for side, m in (("upper", up), ("lower", lo))}
+    out = torch.empty(shape, dtype=torch.long)
+    left = []                                           # (row, opened index) that no rule decides once opened
+    for begin in range(0, len(e), 20_000):
+        check_cancelled()
+        x = e[begin:begin + 20_000].long()
+        r = classify_samples_with_indices(onehot(x), up, lo, return_masks=True, return_violations=True)
+        inside = {}
+        for side in ("upper", "lower"):
+            v = r[f"violations_{side}"]
+            inside[side] = (torch.zeros(len(x), len(cols), dtype=torch.bool) if v is None else
+                            ((v == 0).float() @ allows[side] + (v == 1).float() @ needs[side]) > 0)
+        closed = x[:, cols] == 0
+        out[begin:begin + len(x)] = torch.where(closed, inside["upper"].long(), r["mask_upper"].long()[:, None])
+        row, j = torch.where(closed & ~inside["upper"] & ~inside["lower"])
+        left.append((row + begin, j))
+    row = torch.cat([a for a, _ in left])
+    j = torch.cat([b for _, b in left])
+    if len(row):
+        y = e[row].long().clone()
+        y[torch.arange(len(row)), cols[j]] = 1
+        unique, inverse = torch.unique(y, dim=0, return_inverse=True)
+        learn(unique)
+        r = classify_samples_with_indices(onehot(unique), *prob.rules, return_masks=True)
+        if r["unknown"]:
+            raise RuntimeError(f"{name}: {r['unknown']} opened rows left undecided after learning rules from them")
+        out[row, j] = r["mask_upper"].long()[inverse]
+    return out, n_ops
 
 
 # ---- a whole run --------------------------------------------------------------------------------------

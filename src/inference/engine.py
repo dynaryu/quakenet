@@ -26,7 +26,8 @@ from typing import Any, Callable, Mapping
 import numpy as np
 from jsonschema import Draft202012Validator
 
-from src.builder.bn_builder import Compiled, build_tbn, compile_assembly, node_id
+from src.builder.bn_builder import Compiled, compile_assembly, node_id
+from src.builder.builders import build_tbn
 from src.builder.load import (Library, RegistryError, assembly_id_of, assembly_path, assembly_paths,
                               check_tables, load_assembly, load_library, load_network)
 
@@ -205,6 +206,16 @@ def compile_query(query: Mapping[str, Any]) -> Compiled:
                 raise QueryError(f"{fn_id} takes its values from parameter set {b.get('parameter_set')!r}; "
                                  "choose another set with parameter_sets instead")
             b["parameters"] = {**b["parameters"], **values}
+    # The scenario's ShakeMap is one choice: the event set for hazard.shakemap applies to every other binding
+    # that reads a ShakeMap (its inline parameters name an event_id), e.g. ground-failure functions, unless
+    # the query sets that function's own.
+    scenario = {k: v for k, v in query.get("parameters", {}).get("hazard.shakemap", {}).items()
+                if k in ("event_id", "version", "source")}
+    if scenario:
+        for b in assembly["bindings"]:
+            if b["function"] != "hazard.shakemap" and b["function"] not in query.get("parameters", {}) \
+                    and "event_id" in b.get("parameters", {}):
+                b["parameters"] = {**b["parameters"], **scenario}
     for fn_id, set_id in query.get("parameter_sets", {}).items():
         if fn_id in lib.models:                   # a model a function uses, e.g. the hazard field's correlation
             targets = [b for b in assembly["bindings"]
@@ -245,7 +256,7 @@ def sample_nodes(compiled: Compiled, n: int, seed: int | None = None, bindings: 
     (``rules_report``). ``on_missing_rules(threshold, origins)``, if given, is called before sampling with
     the origins that have no rules of their own at the system event's threshold.
     """
-    from . import cliques
+    from . import trees
 
     if n < 1:
         raise ValueError("n must be at least 1")
@@ -257,7 +268,7 @@ def sample_nodes(compiled: Compiled, n: int, seed: int | None = None, bindings: 
         if missing:
             on_missing_rules(threshold, missing)
     with _SAMPLING_LOCK:
-        rows, _ = cliques.sample(cliques.tree(probs), dict(evidence or {}), n_chain=CHAINS, n_burn=BURN,
+        rows, _ = trees.sample(trees.tree(probs), dict(evidence or {}), n_chain=CHAINS, n_burn=BURN,
                                  n_keep=-(-n // CHAINS), seed=DEFAULT_SEED if seed is None else int(seed), do=do)
     if notes is not None:
         for prob in probs.values():
@@ -324,7 +335,8 @@ def _needed(query: Mapping[str, Any], compiled: Compiled):
 
 def _computed(compiled: Compiled, bindings: set[int], needed: set[str]) -> int:
     """How many variables sampling a query's scope computes: its objects' every child (a joint field whole)."""
-    from src.builder.bn_builder import tbn_data, tbn_nodes
+    from src.builder.bn_builder import tbn_nodes
+    from src.builder.builders import tbn_data
 
     specs = tbn_nodes(tbn_data(compiled, bindings))
     keys = [k for k, s in specs.items() if any(c in needed for c in s["childs"])]
@@ -333,7 +345,8 @@ def _computed(compiled: Compiled, bindings: set[int], needed: set[str]) -> int:
 
 def scope(query: Mapping[str, Any]) -> dict[str, Any]:
     """Which part of the BN a query depends on, and what sampling it computes, without sampling anything."""
-    from src.builder.bn_builder import tbn_data, tbn_nodes
+    from src.builder.bn_builder import tbn_nodes
+    from src.builder.builders import tbn_data
 
     query = _validate(query)
     compiled = compile_query(query)
@@ -365,6 +378,8 @@ def missing_rules(systems: list[Any]) -> tuple[list[str], float | None]:
 
     missing, threshold = [], None
     for prob in systems:                          # one origin per system object
+        if not hasattr(prob, "target_add_h"):     # connectivity: its rules are learnt further from the rows
+            continue
         threshold = prob.target_add_h
         if rules_source(_loaded_reference(prob), threshold) != "exact":
             missing.append(prob.origin)
@@ -383,6 +398,14 @@ def rules_report(systems: list[Any]) -> dict[str, Any]:
     what they can and ndtools decides the rest, so the answer is the same, only slower."""
     from src.builder.bn_builder import rules_source
 
+    direct = [p for p in systems if not hasattr(p, "target_add_h")]     # e.g. connectivity: no threshold
+    systems = [p for p in systems if hasattr(p, "target_add_h")]
+    if not systems:
+        ruled = sum(p.rules is not None for p in direct)
+        return {"target_add_h": None, "origins": [], "extract": [],
+                "note": f"{len(direct)} system state(s) judged by connectivity, through rsr rules (stored for "
+                        f"{ruled} of them): the rows they leave undecided are learnt from, so every row is decided "
+                        f"by a rule."}
     origins, threshold = [], None
     for prob in systems:                          # one origin per system object
         threshold = prob.target_add_h
@@ -509,7 +532,8 @@ def answer(query: Mapping[str, Any],
     samples, bank = None, {"path": None, "reused": False, "bytes": None, "reason": None}
     try:
         if policy in ("bank", "whole"):
-            from src.builder.bn_builder import _tbn_fingerprint, tbn_data
+            from src.builder.bn_builder import _tbn_fingerprint
+            from src.builder.builders import tbn_data
 
             whole = tbn_data(compiled)
             if do:

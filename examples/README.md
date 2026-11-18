@@ -12,7 +12,12 @@ tools take, checked against the [schema](../schema/README.md) like everything el
 |---|---|
 | `ema-highway/gmm` | Eastern Massachusetts highways, 129 bridges, a fixed M8 scenario through Campbell (2003), whether each of 72 nodes reaches the nearest airport in time; 588 nodes |
 | `hebei-transport/shakemap` | Hebei directed network, 33 bridges, under the 1966 Xingtai earthquake's USGS ShakeMap, with spatially correlated residuals, whether each of 21 nodes reaches Handan in time; 186 nodes |
+| `kahramanmaras-2023/shakemap` | Roads around the 2023 Kahramanmaraş earthquakes under a USGS ShakeMap (the M7.8 by default): 211 bridges, and 240 ground-failure components (liquefaction, landslide, fault crossings) whose permanent ground displacement closes the road by the Hazus roadway curve, in series with the bridges on each of 838 edges; whether each of 46 towns is still connected to each of 3 relief sources; 2,246 nodes |
 | `toy-ca/demo` | an 8-node toy network in central California under a hypothetical M7.8 on the San Andreas, with an approximate demo GMM; 46 nodes. `toy-ca-demo.qmd` walks through it; `answer-sheet.md` lists the questions we expect and the probability queries they translate to |
+
+`kahramanmaras-2023/` was built for this repository from OpenStreetMap, the Bas et al. (2024) bridge
+database, a DEM and the GEM active-fault database; its README logs how, with every assumption and
+reference.
 
 The EMA and Hebei networks came from the `network-datasets` repository through the
 earlier pilot's packages (commit `784e6cc`). These files are now the source.

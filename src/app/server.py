@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 import subprocess
 import sys
@@ -57,7 +58,8 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from src.builder import shakemap
-from src.builder.bn_builder import attach_rules, compile_path, model_dir, tbn_data
+from src.builder.bn_builder import compile_path, model_dir
+from src.builder.builders import attach_rules, tbn_data
 from src.builder.load import (ROOT, RegistryError, assembly_id_of, assembly_path, load_assembly,
                               load_network)
 from src.cancellation import InferenceCancelled, cancellable, check_cancelled
@@ -120,6 +122,8 @@ def example(assembly_id: str) -> dict[str, Any]:
     data = tbn_data(compiled)
     systems = [n for n in data["nodes"] if n["metadata"]["role"] == "system"]
     stored = attach_rules(data, model_dir(path))
+    nodes = compiled.nodes()
+    tables = edge_tables(data)
     return {
         "assembly": compiled.assembly, "menu": engine.describe(assembly_id),
         "network": {"id": network.id, "title": network.title, "assumptions": network.assumptions,
@@ -127,11 +131,75 @@ def example(assembly_id: str) -> dict[str, Any]:
         "functions": [compiled.bindings[i].function["id"] for i in compiled.order],
         "objects": len(data["nodes"]), "variables": len(data["variables"]),
         # Every BN node and its parents, for the layered drawing; one joint object per stochastic Joint binding.
-        "nodes": [{k: n[k] for k in ("id", "quantity", "entity", "row", "function", "parameter_set", "parents")}
-                  for n in compiled.nodes()],
+        "nodes": [{k: n[k] for k in ("id", "quantity", "entity", "row", "function", "parameter_set", "parents",
+                                       "binding", "where")}
+                  for n in nodes],
+        # The clique tree's message passing for this BN (its fields and kinds of clique), for the Clique tree tab.
+        "inference": inference_of(nodes),
+        # The clique tree itself, by the same module: each clique's members, separator, kind and factors.
+        "cliques": cliques_of(nodes, tables),
         "joint": sorted({n["metadata"]["function"] for n in data["nodes"] if len(n["childs"]) > 1}),
         "rules": {"stored": stored, "origins": len(systems)},
+        # Each edge's series table (edge.open), as its kernel builds it, for the BN tab to show.
+        "tables": tables,
     }
+
+
+def inference_of(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """The clique tree's message passing for a BN of these nodes, as the module that samples it declares it: on
+    one bridge per edge under SA, cliques.describe(); with series edges, cliques_series.describe()."""
+    from src.inference import trees
+
+    return trees.describe(nodes)
+
+
+def cliques_of(nodes: list[dict[str, Any]], tables: dict[str, Any]) -> dict[str, Any]:
+    """The clique tree the Clique tree tab draws, as the module that samples this BN defines it (trees.drawing)."""
+    from src.inference import trees
+
+    return trees.drawing(nodes, tables)
+
+
+def edge_tables(data: dict[str, Any]) -> dict[str, Any]:
+    from src.builder.kernels.edge import series_table
+
+    states = {v["name"]: v.get("states") for v in data["variables"]}
+    out = {}
+    for n in data["nodes"]:
+        if n["cls"] != "EdgeOpen":
+            continue
+        kw = {**data["parameter_sets"].get(n.get("parameter_set"), {}), **n.get("kwargs", {})}
+        out[n["childs"][0]] = series_table(n["childs"][0], n["parents"], states, kw["usable_states"],
+                                           kw.get("n_bridges"), kw.get("order"))
+    return out
+
+
+_forms: dict[str, dict[str, Any]] = {}
+_forms_lock = threading.Lock()
+
+
+def forms(assembly_id: str) -> dict[str, Any]:
+    """Each BN variable's distribution as its probability object reads it, for the BN tab to audit: the object
+    (one per node, or one joint object for a field), its statement P(child | parents), its form and the lines
+    under it (parameters' source, notes). Built once per example under its own scenario, then kept."""
+    with _forms_lock:
+        if assembly_id not in _forms:
+            from src.builder.builders import build_tbn
+            from tbnpy.probability import statement
+
+            _, probs = build_tbn(compile_path(assembly_path(assembly_id), engine.library()))
+            objects, of, site = {}, {}, {}
+            for key, p in probs.items():
+                details = [] if type(p).__name__ == "EdgeOpen" else p.form_details()    # an edge's table: edge_tables
+                objects[key] = {"joint": len(p.childs) > 1, "n": len(p.childs), "form": p.form(), "details": details,
+                                "statement": statement(p) if len(p.childs) == 1 else f"P({len(p.childs)} variables jointly)"}
+                of.update({v.name: key for v in p.childs})
+                if len(p.childs) > 1 and hasattr(p, "ln_median") and hasattr(p, "sigma"):   # a field: each site's own marginal
+                    for v, mu, sd in zip(p.childs, p.ln_median.tolist(), p.sigma.tolist()):
+                        unit = "cm/s" if v.name.startswith("PGV") else "g"
+                        site[v.name] = f"at this site: median {math.exp(mu):.3g} {unit}, sigma {sd:.3f} (ln units)"
+            _forms[assembly_id] = {"objects": objects, "of": of, "site": site}   # each object once; each variable names its own
+        return _forms[assembly_id]
 
 
 # Posterior sessions, one per example, kept while the server runs. Sampling takes seconds to minutes, so a
@@ -211,13 +279,13 @@ def _session_path(assembly_id: str) -> Path:
 def _session_bn(assembly_id: str, settings: dict[str, Any]) -> tuple[Any, Any, Any, dict[str, float], list[str]]:
     """The example's BN under the scenario settings: the clique tree's pieces, the tbnpy objects and variables,
     the towns' populations, and the functions computed."""
-    from src.builder.bn_builder import build_tbn
-    from src.inference import cliques
+    from src.builder.builders import build_tbn
+    from src.inference import trees
 
     compiled = engine.compile_query({"assembly": assembly_id, **settings})
     variables, probs = build_tbn(compiled)
     population = {r["id"]: r["population"] for r in compiled.network.rows("Node") if r.get("population") is not None}
-    return (cliques.tree(probs), probs, variables, population,
+    return (trees.tree(probs), probs, variables, population,
             [compiled.bindings[i].function["id"] for i in compiled.order])
 
 
@@ -459,6 +527,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "; ".join(problems)}, HTTPStatus.NOT_FOUND)
         if url.path == "/api/views":
             return self._json(views())
+        if url.path == "/api/forms":
+            try:
+                return self._json({"forms": forms((parse_qs(url.query).get("assembly") or [""])[0])})
+            except (RegistryError, engine.QueryError) as exc:
+                problems = exc.problems if isinstance(exc, RegistryError) else [str(exc)]
+                return self._json({"error": "; ".join(problems)}, HTTPStatus.NOT_FOUND)
         if url.path in {"/api/session", "/api/session/node"}:
             params = parse_qs(url.query)
             assembly = (params.get("assembly") or [""])[0]
@@ -473,9 +547,13 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/session/progress":
             return self._json({"progress": inference_progress((parse_qs(url.query).get("request_id") or [""])[0])})
         if url.path == "/api/inference":
-            # The clique tree's message passing as src/inference/cliques.py declares it, for the Clique tree tab.
-            from src.inference import cliques
-            return self._json(cliques.describe())
+            # The clique tree's message passing for the Clique tree tab: for one example's BN if ?assembly= names
+            # it (as /api/example gives it), else cliques.py's, for one bridge per edge.
+            from src.inference import trees
+            assembly = (parse_qs(url.query).get("assembly") or [""])[0]
+            if assembly:
+                return self._json(inference_of(compile_path(assembly_path(assembly), engine.library()).nodes()))
+            return self._json(trees.describe())
         if url.path == "/api/chat-status":
             ok, reason = chat.available()
             return self._json({"available": ok, "reason": reason, "provider": chat.provider(),

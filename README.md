@@ -32,7 +32,7 @@ conda activate quakenet
 python -m src serve --open --example ema-highway/gmm
 ```
 
-The environment installs rsr (`rsr-duco` 0.3.1 or later) from PyPI. To work on rsr alongside the app,
+The environment installs rsr (`rsr-duco` 0.4.1 or later) from PyPI. To work on rsr alongside the app,
 install your rsr checkout over it instead: `python -m pip install -e ../rsr`.
 
 The app opens at **http://127.0.0.1:8765**. Keep the terminal open while using it.

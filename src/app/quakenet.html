@@ -238,6 +238,12 @@ table.data { border-collapse: collapse; font-size: 12px; width: 100%; }
 table.data th, table.data td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
 table.data td.num, table.data th.num { text-align: right; }
 details summary { cursor: pointer; color: var(--ink-2); font-size: 12px; margin-top: 8px; }
+.form { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11.5px; margin: 4px 0; overflow-wrap: anywhere; }
+.dist .meta { overflow-wrap: anywhere; }
+.series-scroll { max-width: 380px; max-height: 260px; overflow: auto; }
+.series .data td, .series .data th { font-size: 11px; padding: 1px 6px; white-space: nowrap; }
+.series .cell-closed { font-weight: 600; }
+.series .cell-any { color: var(--ink-2); }
 /* Real earthquakes: the ShakeMap in use, the Earthquakes panel, and notices of new events and revised maps. */
 #notice { flex: none; display: flex; flex-direction: column; }
 #notice:empty { display: none; }
@@ -415,11 +421,17 @@ const fmtP = p => p == null ? "–" : p < 0.001 && p > 0 ? p.toExponential(1) : 
 const FAMILIES = [
   { quantity: "SystemState", table: "Node", label: "origin fails", value: "Fail", index: 0 },
   { quantity: "EdgeOpen", table: "Edge", label: "edge closed", value: "False", index: 0 },
+  { quantity: "RoadOpen", table: "GroundFailure", label: "road closed", value: "False", index: 0 },
 ];
+const familyOf = quantity => FAMILIES.find(f => f.quantity === quantity || quantity.startsWith(f.quantity + "."));
+// Per-source system layers (a Support table: one row per town and source, and one with no source for "any
+// source"): the map colours each town by the source chosen in the legend.
+const supportRows = () => state.ex?.network?.tables?.Support || [];
+const supportSources = () => [...new Set(supportRows().map(r => r.source).filter(Boolean))];
 // A bridge has no state of its own: it closes the edge it carries, so it takes that edge's colour.
 
 const state = { examples: [], ex: null, result: null, session: null, preset: {}, epoch: 0, loading: false,
-                basemap: store.get("basemap") !== "off" };
+                basemap: store.get("basemap") !== "off", supportSource: store.get("supportSource") || "any" };
 
 // ---- loading an example ---------------------------------------------------------------
 
@@ -473,9 +485,10 @@ async function load(id) {
     const example = await getJSON(`/api/example?assembly=${encodeURIComponent(id)}`);
     if (epoch !== state.epoch) return;
     state.ex = example;
+    loadForms(id, epoch);
     store.set("example", id);
     history.replaceState(null, "", `#example=${encodeURIComponent(id)}`);
-    Object.assign(cliquePick, { obs: 0, local: 0, systems: 0 });
+    Object.assign(cliquePick, { obs: 0, comp: 0, local: 0, systems: 0 });
     renderControls(); renderQuakeLine();
     if (!await loadSession(id, epoch)) return;
     restoreConversation();
@@ -495,6 +508,14 @@ async function load(id) {
       saveConversation();
     }
   }
+}
+
+// Each variable's distribution as its probability object reads it (/api/forms), for audit: fetched once per example
+// in the background, since building the objects takes a few seconds.
+function loadForms(id, epoch) {
+  getJSON(`/api/forms?assembly=${encodeURIComponent(id)}`)
+    .then(f => { if (epoch === state.epoch && state.ex) state.ex.forms = f.forms; })
+    .catch(() => {});
 }
 
 // ---- controls: the scenario and the choices the assembly leaves open ---------------------
@@ -586,10 +607,22 @@ function probabilities() {
   if (!state.result) return out;
   for (const e of state.result.events) {
     const [quantity, row] = e.node.split("::");
-    const fam = FAMILIES.find(f => f.quantity === quantity);
+    const fam = familyOf(quantity);
     // Map labels describe failure; a requested success probability must not be labelled as failure.
     // A query may name the state by its label or its index ("Fail" or 0).
     if (fam && e.op === "==" && (String(e.value) === fam.value || e.value === fam.index)) out[row] = { p: e.p, ci95: e.ci95, family: fam };
+  }
+  const rows = supportRows();
+  if (rows.length) {
+    const label = src => src === "any" ? "cut off from every source" : `not reachable from ${src}`;
+    for (const r of rows) {
+      const src = r.source ?? "any";
+      if (out[r.id]) out[`${r.origin}@${src}`] = { ...out[r.id], family: { ...out[r.id].family, label: label(src) } };
+    }
+    for (const town of new Set(rows.map(r => r.origin))) {
+      const pick = out[`${town}@${state.supportSource}`];
+      if (pick) out[town] = pick;
+    }
   }
   return out;
 }
@@ -614,7 +647,8 @@ function renderMap() {
   const svg = $("#map"), t = state.ex.network.tables;
   const nodes = t.Node || [], edges = t.Edge || [], bridges = t.Bridge || [];
   const ev = eventRow();
-  const pts = [...nodes, ...bridges, ...(ev && ev.lat != null ? [ev] : [])];
+  const course = edges.flatMap(e => (e.geometry || []).map(([lat, lon]) => ({ lat, lon })));
+  const pts = [...nodes, ...bridges, ...course, ...(ev && ev.lat != null ? [ev] : [])];
   if (!pts.length) { svg.innerHTML = ""; return; }
   const xs = pts.map(p => mercX(p.lon)), ys = pts.map(p => mercY(p.lat));
   const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) || 1e-4, pad = span * 0.08;
@@ -630,18 +664,31 @@ function renderMap() {
   const big = nodes.length <= 40;
   let h = state.basemap ? tiles(x0, y0, x1, y1, s) : "";
   for (const e of edges) {
-    const a = byId[e.source], b = byId[e.target];
-    if (!a || !b) continue;
+    const line = edgeCourse(e, byId);
+    if (!line) continue;
+    const p = line.map(q => `${X(q.lon)},${Y(q.lat)}`).join(" ");
+    if (e.fixed_open) {                                 // cannot close: in the graph, not a variable
+      h += `<polyline points="${p}" fill="none" stroke="var(--grid)" stroke-width="${1.5 * u}" stroke-linejoin="round"/>`;
+      continue;
+    }
     const pe = probs[e.id];
-    h += `<g data-tip="edge" data-id="${esc(e.id)}"><line x1="${X(a.lon)}" y1="${Y(a.lat)}" x2="${X(b.lon)}" y2="${Y(b.lat)}" ` +
-         `stroke="${colour(pe?.p, top)}" stroke-width="${(big ? 6 : 3) * u}" stroke-linecap="round"/>` +
-         `<line x1="${X(a.lon)}" y1="${Y(a.lat)}" x2="${X(b.lon)}" y2="${Y(b.lat)}" stroke="transparent" stroke-width="${18 * u}"/></g>`;
+    h += `<g data-tip="edge" data-id="${esc(e.id)}"><polyline points="${p}" fill="none" ` +
+         `stroke="${colour(pe?.p, top)}" stroke-width="${(big ? 6 : 3) * u}" stroke-linecap="round" stroke-linejoin="round"/>` +
+         `<polyline points="${p}" fill="none" stroke="transparent" stroke-width="${18 * u}"/></g>`;
   }
   for (const b of bridges) {
     const pb = probs[b.edge], s = (big ? 14 : 8) * u;
     h += `<g data-tip="bridge" data-id="${esc(b.id)}"><rect x="${X(b.lon) - s / 2}" y="${Y(b.lat) - s / 2}" width="${s}" height="${s}" rx="${2 * u}" ` +
          `fill="${colour(pb?.p, top)}" stroke="var(--surface)" stroke-width="${2 * u}"/>` +
          `<rect x="${X(b.lon) - s}" y="${Y(b.lat) - s}" width="${2 * s}" height="${2 * s}" fill="transparent"/></g>`;
+  }
+  for (const g of t.GroundFailure || []) {
+    const pg = probs[g.id], s = (big ? 12 : 7) * u, cx = X(g.lon), cy = Y(g.lat);
+    const shape = g.kind === "landslide" ? `${cx},${cy - s} ${cx + s},${cy + s * 0.8} ${cx - s},${cy + s * 0.8}`        // triangle
+                : g.kind === "liquefaction" ? `${cx},${cy - s} ${cx + s},${cy} ${cx},${cy + s} ${cx - s},${cy}`      // diamond
+                : `${cx - s},${cy - s * 0.35} ${cx + s},${cy - s * 0.35} ${cx + s},${cy + s * 0.35} ${cx - s},${cy + s * 0.35}`; // bar: fault
+    h += `<g data-tip="ground" data-id="${esc(g.id)}"><polygon points="${shape}" fill="${colour(pg?.p, top)}" ` +
+         `stroke="var(--ink)" stroke-width="${1 * u}"/><circle cx="${cx}" cy="${cy}" r="${2 * s}" fill="transparent"/></g>`;
   }
   for (const n of nodes) {
     const pn = probs[n.id], r = (big ? 9 : 5) * u, cx = X(n.lon), cy = Y(n.lat);
@@ -666,6 +713,13 @@ function renderMap() {
   renderLegend(top, !!state.result);
 }
 
+// An edge's course as {lat, lon} points: its geometry where it has one, else its two end nodes.
+function edgeCourse(e, byNode) {
+  if (e.geometry && e.geometry.length >= 2) return e.geometry.map(([lat, lon]) => ({ lat, lon }));
+  const a = byNode[e.source], b = byNode[e.target];
+  return a && b ? [a, b] : null;
+}
+
 // Web Mercator in world units [0, 1], the projection map tiles are drawn in.
 const mercX = lon => (lon + 180) / 360;
 const mercY = lat => (1 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / Math.PI) / 2;
@@ -687,13 +741,24 @@ function tiles(x0, y0, x1, y1, s) {
 
 function renderLegend(top, ran) {
   const ramp = `<div class="ramp">${SEQ.map(c => `<span style="background:${c}"></span>`).join("")}</div>`;
+  const sources = supportSources(), ground = (state.ex?.network?.tables?.GroundFailure || []).length;
+  const chooser = sources.length ? `<label>Town colour: support from <select id="support-source">` +
+    ["any", ...sources].map(s => `<option value="${esc(s)}"${s === state.supportSource ? " selected" : ""}>${s === "any" ? "any source" : esc(s)}</option>`).join("") +
+    `</select></label>` : "";
   $("#legend").innerHTML = (ran
     ? `<span class="scale">P(failure) <span>0</span>${ramp}<span>${top}</span></span>`
     : `<span class="scale">Not run yet: grey</span>`) +
-    `<span class="key"><svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="var(--idle)" stroke="var(--ink)"/></svg>origin: fails to reach a key destination in time</span>` +
+    (sources.length
+      ? `<span class="key"><svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="var(--idle)" stroke="var(--ink)"/></svg>town: ${state.supportSource === "any" ? "not reachable from any source" : `not reachable from ${esc(state.supportSource)}`}</span>` + chooser
+      : `<span class="key"><svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="var(--idle)" stroke="var(--ink)"/></svg>origin: fails to reach a key destination in time</span>`) +
     `<span class="key"><svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="var(--surface)" stroke="var(--ink)"/><circle cx="7" cy="7" r="6.5" fill="none" stroke="var(--ink)"/></svg>key destination</span>` +
     `<span class="key"><svg width="14" height="14"><line x1="1" y1="7" x2="13" y2="7" stroke="var(--idle)" stroke-width="4" stroke-linecap="round"/></svg>edge: closed</span>` +
+    ((state.ex?.network?.tables?.Edge || []).some(e => e.fixed_open)
+      ? `<span class="key"><svg width="14" height="14"><line x1="1" y1="7" x2="13" y2="7" stroke="var(--grid)" stroke-width="1.5"/></svg>road that cannot close</span>` : "") +
     `<span class="key"><svg width="14" height="14"><rect x="2" y="2" width="10" height="10" rx="2" fill="var(--idle)"/></svg>bridge: closes its edge</span>` +
+    (ground ? `<span class="key"><svg width="14" height="14"><polygon points="7,1 13,12 1,12" fill="var(--idle)" stroke="var(--ink)"/></svg>landslide</span>` +
+              `<span class="key"><svg width="14" height="14"><polygon points="7,1 13,7 7,13 1,7" fill="var(--idle)" stroke="var(--ink)"/></svg>liquefaction</span>` +
+              `<span class="key"><svg width="14" height="14"><rect x="1" y="5" width="12" height="4" fill="var(--idle)" stroke="var(--ink)"/></svg>fault crossing: closes the road</span>` : "") +
     `<span class="key"><svg width="14" height="14"><polygon points="7,1 8.8,5.5 13,5.5 9.6,8.3 10.9,13 7,10.2 3.1,13 4.4,8.3 1,5.5 5.2,5.5" fill="var(--ink)"/></svg>epicentre</span>` +
     `<label><input type="checkbox" id="basemap"${state.basemap ? " checked" : ""}>Base map</label>` +
     (state.basemap ? `<span class="credit">Base map © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</span>` : "");
@@ -707,11 +772,26 @@ function tipHTML(kind, id) {
   const pLine = pr ? `<div>P(${esc(pr.family.label)}) = <b class="v">${fmtP(pr.p)}</b> <span class="v">[${fmtP(pr.ci95[0])}, ${fmtP(pr.ci95[1])}]</span></div>` : "";
   if (kind === "node") {
     const n = t.Node.find(x => x.id === id);
+    const per = supportSources().map(src => probs[`${id}@${src}`] ? `<div>not reachable from ${esc(src)}: <b class="v">${fmtP(probs[`${id}@${src}`].p)}</b></div>` : "").join("");
+    const any = probs[`${id}@any`] ? `<div>not reachable from any source: <b class="v">${fmtP(probs[`${id}@any`].p)}</b></div>` : "";
+    if (per || any) return `<b>${esc(id)}</b>${n.name ? ` · ${esc(n.name)}` : ""}<div>town</div>${per}${any}`;
     return `<b>${esc(id)}</b>${n.name ? ` · ${esc(n.name)}` : ""}<div>${n.key_destination ? "key destination" : pr ? "origin" : "node"}</div>${pLine}`;
   }
   if (kind === "edge") {
     const e = t.Edge.find(x => x.id === id), on = (t.Bridge || []).filter(b => b.edge === id).map(b => b.id);
-    return `<b>${esc(id)}</b> · ${esc(e.source)}–${esc(e.target)}<div>${e.length_km.toFixed(1)} km at ${e.avg_speed_kph} km/h; bridges: ${on.length ? esc(on.join(", ")) : "none"}</div>${pLine}`;
+    const gf = (t.GroundFailure || []).filter(g => g.edge === id).map(g => `${g.id} (${g.kind})`);
+    return `<b>${esc(id)}</b> · ${esc(e.source)}–${esc(e.target)}<div>${e.length_km.toFixed(1)} km at ${e.avg_speed_kph} km/h; bridges: ${on.length ? esc(on.join(", ")) : "none"}` +
+           `${gf.length ? `; ground failure: ${esc(gf.join(", "))}` : ""}</div>${pLine}`;
+  }
+  if (kind === "ground") {
+    const g = t.GroundFailure.find(x => x.id === id);
+    const what = g.kind === "fault" ? `fault crossing${g.fault_id ? ` (${esc(g.fault_id)}, ${esc(g.slip_type)})` : ""}`
+      : g.kind === "liquefaction" ? `liquefaction, class ${esc(g.liq_class)}, ${(g.length_km * 1000).toFixed(0)} m`
+      : `landslide, slope ${g.slope_deg.toFixed(0)}°, ${(g.length_km * 1000).toFixed(0)} m`;
+    // Whether the ground fails is the event PGD > 0.
+    const occ = (state.result?.events || []).find(e => e.node.startsWith("PGD.") && e.node.endsWith(`::${id}`) && e.op === ">");
+    const occLine = occ ? `<div>P(ground fails, PGD &gt; 0) = <b class="v">${fmtP(occ.p)}</b> <span class="v">[${fmtP(occ.ci95[0])}, ${fmtP(occ.ci95[1])}]</span></div>` : "";
+    return `<b>${esc(id)}</b> on ${esc(g.edge)}<div>${what}; road ${esc(g.road_class)}</div>${occLine}${pLine}`;
   }
   if (kind === "bridge") {
     const b = t.Bridge.find(x => x.id === id);
@@ -768,13 +848,18 @@ function renderResults() {
   el.hidden = !res;
   if (!res) { el.innerHTML = ""; $("#pane-compute").innerHTML = notRun; return; }
   const probs = probabilities(), groups = {};
-  for (const [id, v] of Object.entries(probs)) (groups[v.family.quantity] ??= []).push({ id, ...v });
+  // A network with a support route per town from no source in particular (T..-any) lists those alone among
+  // the systems: each town's access from any source. The per-source routes stay on the map and its legend.
+  const anyRoute = new Set(supportRows().filter(r => r.source == null).map(r => r.id));
+  const listed = (id, v) => !id.includes("@") && !(anyRoute.size && v.family.quantity === "SystemState" && !anyRoute.has(id));
+  for (const [id, v] of Object.entries(probs)) if (listed(id, v)) (groups[v.family.quantity] ??= []).push({ id, ...v });
   let h = "";
   for (const f of FAMILIES) {
     const rows = groups[f.quantity];
     if (!rows) continue;
+    const label = f.quantity === "SystemState" && anyRoute.size ? "cut off from every source" : f.label;
     const shown = rows.length > 25 ? [...rows].sort((a, b) => b.p - a.p).slice(0, 25) : rows;
-    h += `<h3>P(${esc(f.label)})${rows.length > shown.length ? ` · top ${shown.length} of ${rows.length}` : ""}</h3>${bars(shown, f.label)}` +
+    h += `<h3>P(${esc(label)})${rows.length > shown.length ? ` · top ${shown.length} of ${rows.length}` : ""}</h3>${bars(shown, label)}` +
          `<details><summary>Table</summary><table class="data"><tr><th>${esc(f.table)}</th><th class="num">P</th><th class="num">95% interval</th></tr>` +
          [...rows].sort((a, b) => b.p - a.p).map(r => `<tr><td>${esc(r.id)}</td><td class="num">${fmtP(r.p)}</td><td class="num">${fmtP(r.ci95[0])}–${fmtP(r.ci95[1])}</td></tr>`).join("") +
          `</table></details>`;
@@ -816,7 +901,13 @@ function renderResults() {
 
 // ---- the BN: every variable, layer by layer, at its row's location ----------------------------------------
 
-const LAYER_NAMES = { hazard: "intensity", observation: "observed intensity", fragility: "damage", edge: "edge state", system: "system state" };
+const LAYER_NAMES = { hazard: "intensity", groundfailure: "ground displacement", observation: "observed intensity", fragility: "damage",
+                      edge: "edge state", system: "system state" };
+// What a plane holds, in words: by its quantity's family where the role alone is too coarse.
+const QUANTITY_ROLES = { PGD: "ground displacement", RoadOpen: "road state" };
+const layerRole = l => QUANTITY_ROLES[l.quantity.split(".")[0]] || LAYER_NAMES[l.function.split(".")[0]] || l.function;
+// A binding's where, as a plane's subtitle: "source S1", "source any" (an attribute left out).
+const whereText = w => w ? Object.entries(w).map(([k, v]) => `${k} ${v === null ? "any" : Array.isArray(v) ? v.join("/") : v}`).join(", ") : "";
 let bnView = { k: 1, tx: 0, ty: 0 };
 const applyBNView = value => {
   bnView = value;
@@ -834,9 +925,18 @@ function bnLayout() {
   const where = {};
   for (const n of t.Node || []) where[`Node:${n.id}`] = n;
   for (const b of t.Bridge || []) where[`Bridge:${b.id}`] = b;
+  for (const g of t.GroundFailure || []) where[`GroundFailure:${g.id}`] = g;
+  const byNodeId = Object.fromEntries((t.Node || []).map(n => [n.id, n]));
   for (const e of t.Edge || []) {
-    const a = where[`Node:${e.source}`], b = where[`Node:${e.target}`];
-    if (a && b) where[`Edge:${e.id}`] = { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 };
+    const line = edgeCourse(e, byNodeId);
+    if (!line) continue;
+    const m = line.length > 2 ? line[Math.floor(line.length / 2)] : { lat: (line[0].lat + line[1].lat) / 2, lon: (line[0].lon + line[1].lon) / 2 };
+    where[`Edge:${e.id}`] = { lat: m.lat, lon: m.lon };
+  }
+  // A support route (a town and a source) sits at its town; each source has its own plane.
+  for (const r of t.Support || []) {
+    const o = where[`Node:${r.origin}`];
+    if (o) where[`Support:${r.id}`] = { lat: o.lat, lon: o.lon };
   }
   const ev = (t.Event || [])[0];
   if (ev && ev.lat != null) where[`Event:${ev.id}`] = ev;
@@ -844,9 +944,12 @@ function bnLayout() {
   const xs = located.map(p => mercX(p.lon)), ys = located.map(p => mercY(p.lat));
   const gx0 = Math.min(...xs), gx1 = Math.max(...xs), gy0 = Math.min(...ys), gy1 = Math.max(...ys);
   const norm = p => [(mercX(p.lon) - gx0) / ((gx1 - gx0) || 1), (mercY(p.lat) - gy0) / ((gy1 - gy0) || 1)];
-  const layers = [];
-  for (const n of nodes) if (!layers.some(l => l.quantity === n.quantity)) layers.push({ quantity: n.quantity, function: n.function, nodes: [] });
-  for (const n of nodes) layers.find(l => l.quantity === n.quantity).nodes.push(n);
+  const layers = [], key = n => `${n.quantity}|${n.binding ?? ""}`;
+  for (const n of nodes) if (!layers.some(l => l.key === key(n)))
+    layers.push({ key: key(n), quantity: n.quantity, function: n.function, where: n.where, nodes: [] });
+  for (const n of nodes) layers.find(l => l.key === key(n)).nodes.push(n);
+  // A quantity on several planes is told apart by its binding's where.
+  for (const l of layers) l.sub = layers.filter(m => m.quantity === l.quantity).length > 1 ? whereText(l.where) : "";
   return { where, norm, layers };
 }
 
@@ -864,10 +967,21 @@ function renderBN() {
   const streamParents = new Set(stream.flatMap(l => l.nodes.flatMap(n => n.parents)));
   const anchor = Math.max(0, causes.findIndex(l => l.nodes.some(n => streamParents.has(n.id))));
   causes.forEach((l, j) => Object.assign(l, { col: 0, row: j - anchor }));
-  stream.forEach((l, i) => Object.assign(l, { col: 1, row: i }));
-  const row0 = Math.min(0, ...causes.map(l => l.row)), rows = Math.max(...layers.map(l => l.row)) - row0 + 1;
-  const W = L + 2 * (PW + SK) + CG + R, H = TOP + (rows - 1) * GAP + PH + 30;
-  const at = (l, uv) => [L + l.col * (PW + SK + CG) + uv[0] * PW + (1 - uv[1]) * SK, TOP + (l.row - row0) * GAP + uv[1] * PH];
+  // Several system planes (one per binding, e.g. per source) get a third column of their own, right of the
+  // stream's labels, stacked with their middle level with the edge plane, so they read as one kind. With
+  // one, it ends the stream as before.
+  const sys = stream.filter(l => roleOf(l) === "system"), apart = sys.length > 1;
+  const flow = apart ? stream.filter(l => !sys.includes(l)) : stream;
+  flow.forEach((l, i) => Object.assign(l, { col: 1, row: i }));
+  const colX = col => L + col * (PW + SK + CG) + (col > 1 ? R : 0);
+  if (apart) {
+    const edge = flow.find(l => roleOf(l) === "edge") || flow[flow.length - 1];
+    sys.forEach((l, k) => Object.assign(l, { col: 2, row: (edge ? edge.row : 0) + k - (sys.length - 1) / 2 }));
+  }
+  layers.forEach(l => { l.x = colX(l.col); });
+  const row0 = Math.min(0, ...layers.map(l => l.row)), rows = Math.max(...layers.map(l => l.row)) - row0 + 1;
+  const W = colX(apart ? 2 : 1) + PW + SK + R, H = TOP + (rows - 1) * GAP + PH + 30;
+  const at = (l, uv) => [l.x + uv[0] * PW + (1 - uv[1]) * SK, TOP + (l.row - row0) * GAP + uv[1] * PH];
   const pos = {};
   layers.forEach(l => l.nodes.forEach(n => {
     const p = where[`${n.entity}:${n.row}`];
@@ -884,13 +998,13 @@ function renderBN() {
     const c = [[0, 0], [1, 0], [1, 1], [0, 1]].map(uv => at(l, uv).join(",")).join(" ");
     h += `<polygon points="${c}" fill="var(--plane)" stroke="var(--grid)"/>`;
     for (const e of t.Edge || []) {
-      const a = byNode[e.source], b = byNode[e.target];
-      if (!a || !b) continue;
-      const [ax, ay] = at(l, norm(a)), [bx, by] = at(l, norm(b));
-      h += `<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="var(--grid)" stroke-width="1"/>`;
+      const line = edgeCourse(e, byNode);
+      if (!line) continue;
+      const p = line.map(q => at(l, norm(q)).join(",")).join(" ");
+      h += `<polyline points="${p}" fill="none" stroke="var(--grid)" stroke-width="1"/>`;
     }
     const joint = ex.joint.includes(l.function);
-    const role = LAYER_NAMES[roleOf(l)] || l.function;
+    const role = layerRole(l) + (l.sub ? ` · ${l.sub}` : "");
     const [lx, ly] = l.col ? at(l, [1, 0.5]) : at(l, [0, 0.5]), tx = l.col ? lx + 14 : lx - 14, anchor = l.col ? "start" : "end";
     h += `<text x="${tx}" y="${ly - 8}" text-anchor="${anchor}" font-size="15" font-weight="600" style="fill:var(--ink)">${esc(l.quantity)}</text>` +
          `<text x="${tx}" y="${ly + 10}" text-anchor="${anchor}" font-size="13">${esc(role)} · ${l.nodes.length} node${l.nodes.length === 1 ? "" : "s"}</text>` +
@@ -920,36 +1034,19 @@ function renderBN() {
 // ---- the clique tree ------------------------------------------------------------------------------------
 
 function cliqueTree() {
-  // One clique per measurement (a bridge's intensity and its observed value), hanging off the edge clique that
-  // holds the intensity; one clique per edge (the edge, its bridges' damage and their intensities), a hub of
-  // every edge and every intensity, a clique of every edge alone between the hub and the systems, and one clique
-  // per system (the system and the edges it reads).
-  const nodes = state.ex.nodes, byId = Object.fromEntries(nodes.map(n => [n.id, n]));
-  const role = id => byId[id].function.split(".")[0];
-  const ids = r => nodes.filter(n => role(n.id) === r).map(n => n.id);
-  // Each clique also holds the factors assigned to it: P(child | parents), or f( ) for a system's function.
-  const local = ids("edge").map(e => {
-    const damage = byId[e].parents.filter(p => role(p) === "fragility");
-    const intensity = damage.flatMap(d => byId[d].parents);
-    const members = [...intensity, ...damage, e];
-    const factors = [...damage.map(d => `P(${names([d], members)} | ${names(byId[d].parents, members)})`),
-                     `P(${names([e], members)} | ${names(damage, members)})`];
-    return { label: byId[e].row, members, separator: [...intensity, e], factors };
-  });
-  const obs = ids("observation").map(o => {
-    const im = byId[o].parents[0], members = [im, o];
-    return { label: byId[o].row, members, separator: [im], edge: local.findIndex(c => c.members.includes(im)),
-             factors: [`P(${names([o], members)} | ${names([im], members)})`] };
-  });
-  const hub = { members: [...ids("edge"), ...ids("hazard")] };
-  hub.factors = [`P(${names(ids("hazard"), hub.members)})`];
-  const edges = { members: ids("edge"), separator: ids("edge"), factors: ["no factor"] };
-  const systems = ids("system").map(s => {
-    const members = [...byId[s].parents, s];
-    return { label: byId[s].row, members, separator: byId[s].parents,
-             factors: [`f(${names([s], members)} | ${names(byId[s].parents, members)})`] };
-  });
-  return { obs, local, hub, edges, systems };
+  // The tree as the module that samples this BN defines it (src/inference/trees.py drawing(), given by
+  // /api/example): one clique per measurement, hanging off the clique that holds its intensity; one per edge, with
+  // an edge of several components in series holding its own table P(E | D, R) as an edge of one bridge holds
+  // P(E | D), and one per ground-failure component on it, hanging off that edge clique; a hub of every edge and
+  // every field; a clique of every edge alone between the hub and the systems; and one clique per system. Each
+  // clique comes with its members, the separator it shares with the clique it hangs off, its kind (the messages
+  // across that link) and its factors, written out here: P(child | parents), or f( ) for a system's function.
+  const t = state.ex.cliques;
+  const factor = members => f => typeof f === "string" ? f
+    : `${f.f ? "f" : "P"}(${names(f.f ?? f.p, members)}${f.given.length ? ` | ${names(f.given, members)}` : ""})`;
+  const write = c => ({ ...c, factors: c.factors.map(factor(c.members)) });
+  return { obs: t.obs.map(write), comp: t.comp.map(write), local: t.local.map(write), hub: write(t.hub),
+           edges: write(t.edges), systems: t.systems.map(write) };
 }
 
 // Variables by quantity, with the quantity's short name; a long run of rows is shortened to its first and last.
@@ -966,17 +1063,27 @@ const cliqueLines = members => byQuantity(members).map(([, name, rows]) => `${na
 const names = (ids, members) => byQuantity(ids).map(([q, name, rows]) =>
   members.filter(m => m.split("::")[0] === q).length === 1 ? name : `${name} ${rows}`).join(", ");
 
-// Which measurement, edge and system clique are in front of their stacks.
-const cliquePick = { obs: 0, local: 0, systems: 0 };
+// Which measurement, component, edge and system clique are in front of their stacks.
+const cliquePick = { obs: 0, comp: 0, local: 0, systems: 0 };
 let cliqueInference = true;                    // the Inference toggle: the root and the messages across each link
 
-// Put clique i of stack k in front. The measurement stack follows the edge stack, and the other way round:
-// the measurement in front is one on the edge in front.
+// Put clique i of stack k in front. The measurement, component and edge stacks follow each other: the
+// measurement in front is one on the component in front, if it has one, and that is on the edge in front.
 function pickClique(k, i) {
-  const { obs } = cliqueTree();
+  const { obs, comp } = cliqueTree();
   cliquePick[k] = i;
-  if (k === "obs" && obs[i]) cliquePick.local = obs[i].edge;
-  if (k === "local" && obs.some(o => o.edge === i)) cliquePick.obs = obs.findIndex(o => o.edge === i);
+  if (k === "obs" && obs[i]) {
+    cliquePick.local = obs[i].edge;
+    if (obs[i].comp >= 0) cliquePick.comp = obs[i].comp;
+  }
+  if (k === "comp" && comp[i]) {
+    cliquePick.local = comp[i].edge;
+    if (obs.some(o => o.comp === i)) cliquePick.obs = obs.findIndex(o => o.comp === i);
+  }
+  if (k === "local") {
+    if (obs.some(o => o.edge === i)) cliquePick.obs = obs.findIndex(o => o.edge === i);
+    if (comp.some(c => c.edge === i)) cliquePick.comp = comp.findIndex(c => c.edge === i);
+  }
   renderCliques();
 }
 
@@ -993,20 +1100,25 @@ function stackScripts() {
 
 function renderCliques() {
   $("#msg-pop").hidden = true;                    // its message may not be drawn any more
-  const tree = cliqueTree(), { obs, local, systems } = tree;
-  for (const k of ["obs", "local", "systems"]) cliquePick[k] = Math.min(cliquePick[k], Math.max(tree[k].length - 1, 0));
+  const tree = cliqueTree(), { obs, comp, local, systems } = tree;
+  for (const k of ["obs", "comp", "local", "systems"]) cliquePick[k] = Math.min(cliquePick[k], Math.max(tree[k].length - 1, 0));
   // A deck shows up to 10 cards: the clique in front and the 9 after it.
   const BW = 210, LINE = 15, PAD = 10, RULE = 7, HW = 280, DEPTH = 9, DX = 6, DY = 14, TOP = 28;
   // The gaps between cliques: wider when the messages across them are written out.
   const DROP = cliqueInference ? 120 : 64, GAP = cliqueInference ? 260 : 100;
   // The decks sit left of the hub, so that every card's link, leaning right, stays clear of the cards in front.
-  // The measurement deck, the causes, stands left of the edge deck, front cards level, clear of its fanned cards.
-  const MC = BW / 2 + 50, DC = obs.length ? MC + BW + DEPTH * DX + GAP : MC, HC = DC + 150, W = HC + HW / 2 + 20;
+  // The measurement deck, the causes, stands left of the edge deck, front cards level, clear of its fanned cards;
+  // the component deck, if any edge has one, between them.
+  const STEP = BW + DEPTH * DX + GAP;
+  // The leftmost deck leaves room for its "i / n" on its left: more for the component deck, whose n runs to hundreds.
+  const MC = BW / 2 + 50, CC = obs.length ? MC + STEP : MC + 20, DC = comp.length ? CC + STEP : CC, HC = DC + 150, W = HC + HW / 2 + 20;
   const height = c => PAD * 2 + (cliqueLines(c.members).length + c.factors.length) * LINE + RULE;
   const at = (c, y, w, cx) => c && { ...c, x: cx - w / 2, y, w, h: height(c) };
   const edge = at(local[cliquePick.local], TOP + DEPTH * DY, BW, DC);
+  const part = edge && at(comp[cliquePick.comp], edge.y, BW, CC);
   const meas = edge && at(obs[cliquePick.obs], edge.y, BW, MC);
-  const hubY = (edge ? edge.y + edge.h : TOP) + DROP;
+  // A separator of more than two lines (an edge clique's field at several components) gets a wider gap to the hub.
+  const hubY = (edge ? edge.y + edge.h : TOP) + DROP + (edge ? Math.max(0, cliqueLines(edge.separator).length - 2) * 12 : 0);
   const hubBox = at(tree.hub, hubY, HW, HC);
   const edgesBox = at(tree.edges, hubY + hubBox.h + DROP, HW, HC);
   const system = at(systems[cliquePick.systems], edgesBox.y + edgesBox.h + DROP, BW, DC);
@@ -1069,25 +1181,36 @@ function renderCliques() {
   // the clique it joins (at height toY), each at its own angle.
   const toClique = (b, dir, toY) => d =>
     [[b.x + d * DX + b.w - DX / 2, b.y + dir * d * DY + (dir < 0 ? b.h : 0)], [HC + 8 * (d - DEPTH / 2), toY]];
-  // A measurement card's link runs right from its right edge, at its label strip, to the left end of the label
-  // strip of the edge card holding its intensity, if that card is shown: the part the cards in front leave uncovered.
-  const toEdge = d => {
-    const m = obs[(cliquePick.obs + d) % obs.length], de = (m.edge - cliquePick.local + local.length) % local.length;
-    return de > Math.min(local.length - 1, DEPTH) ? null :
-      [[meas.x + d * DX + meas.w, meas.y - d * DY + DY / 2], [edge.x + de * DX, edge.y - de * DY + DY / 2]];
+  // A card's link runs right from its right edge, at its label strip, to the left end of the label strip of the
+  // card it hangs off in the deck to its right (list to, front box tb, stack tk; j its index there), if that card
+  // is shown: the part the cards in front leave uncovered.
+  const toRight = (fb, from, fk, tb, to, tk, j) => d => {
+    const m = from[(cliquePick[fk] + d) % from.length], de = (j(m) - cliquePick[tk] + to.length) % to.length;
+    return de > Math.min(to.length - 1, DEPTH) ? null :
+      [[fb.x + d * DX + fb.w, fb.y - d * DY + DY / 2], [tb.x + de * DX, tb.y - de * DY + DY / 2]];
   };
-  // The measurement links run under the cards; their separator box sits on top of both decks.
+  // A measurement hangs off the component card holding its intensity, or on an edge of one bridge, the edge card.
+  const toEdge = d => obs[(cliquePick.obs + d) % obs.length].comp >= 0
+    ? part && toRight(meas, obs, "obs", part, comp, "comp", m => m.comp)(d)
+    : toRight(meas, obs, "obs", edge, local, "local", m => m.edge)(d);
+  // A ground-failure component's clique hangs off its edge's clique.
+  const toPart = part && toRight(part, comp, "comp", edge, local, "local", c => c.edge);
+  // The measurement and component links run under the cards; their separator boxes sit on top of the decks.
   const measDeck = meas && deck(meas, obs, "obs", "Measurement clique", -1, toEdge);
-  let h = measDeck ? measDeck.links : "";
+  const partDeck = part && deck(part, comp, "comp", "Component clique", -1, toPart);
+  let h = (measDeck ? measDeck.links : "") + (partDeck ? partDeck.links : "");
   if (edge) h += whole(deck(edge, local, "local", "Edge clique", -1, toClique(edge, -1, hubY)));
   if (system) h += whole(deck(system, systems, "systems", "System clique", 1, toClique(system, 1, edgesBox.y + edgesBox.h)));
+  if (partDeck) h += partDeck.cards + partDeck.box;
   if (measDeck) h += measDeck.cards + measDeck.box;
   const between = [[HC, hubY + hubBox.h], [HC, edgesBox.y]];
   h += link(between, edgesBox.separator) + sepBox(HC, (between[0][1] + between[1][1]) / 2, edgesBox.separator);
   h += front(hubBox, "Hub clique") + front(edgesBox, "Edge-state clique");
   // The inference, when shown, as src/inference/cliques.py declares it (/api/inference): its root, and across each
   // link of the cliques in front an arrow each way, with what that message delivers.
-  if (cliqueInference && state.inference) h += inferenceMarks(state.inference);
+  // The example's own (its fields and kinds of clique), as /api/example gives it; the general one otherwise.
+  const inference = state.ex.inference ?? state.inference;
+  if (cliqueInference && inference) h += inferenceMarks(inference);
   const width = W + (cliqueInference ? 150 : 0), svg = $("#cliques");
   svg.setAttribute("viewBox", `0 0 ${width} ${H}`);
   svg.setAttribute("width", width); svg.setAttribute("height", H);
@@ -1138,14 +1261,21 @@ function renderCliques() {
     };
     let s = `<defs><marker id="msg-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">` +
             `<path class="msg-head" d="M0,0 L10,5 L0,10 z"/></marker></defs>`;
-    // (SA, SAObs) and (SA, D, E): two arrows across the gap below the link, each with its heading beneath.
-    const right = said("sa_obs", "sa_d_e"), left = said("sa_d_e", "sa_obs");
-    if (meas && toEdge(0) && right && left) {
-      const x0 = meas.x + meas.w + DEPTH * DX + 12, x1 = edge.x - 56, xm = (x0 + x1) / 2, y = meas.y + 22;   // clear of "1 / n"
-      s += arrow(x0, y, x1, y) + heading(xm, y + 15, "middle", right.head, right.lines, right.tk) +
-           arrow(x1, y + 34, x0, y + 34) + heading(xm, y + 49, "middle", left.head, left.lines, left.tk);
-    }
-    if (edge) s += across(...toClique(edge, -1, hubY)(0), edge.separator, "sa_d_e", "sa_e");
+    // A card and the one it hangs off to its right, e.g. (SA, SAObs) and (SA, D, E): two arrows across the gap
+    // below the link, each with its heading beneath.
+    // The arrows sit below the link's separator box, which grows by half a line each way per line after the first.
+    const sideways = (a, b, ka, kb) => {
+      const right = said(ka, kb), left = said(kb, ka);
+      if (!right || !left) return "";
+      const lines = cliqueLines(a.separator).length;
+      const x0 = a.x + a.w + DEPTH * DX + 12, x1 = b.x - 56, xm = (x0 + x1) / 2, y = a.y + 22 + Math.max(0, lines - 1) * 6;   // clear of "1 / n"
+      return arrow(x0, y, x1, y) + heading(xm, y + 15, "middle", right.head, right.lines, right.tk) +
+             arrow(x1, y + 34, x0, y + 34) + heading(xm, y + 49, "middle", left.head, left.lines, left.tk);
+    };
+    if (meas && toEdge(0)) s += obs[cliquePick.obs].comp >= 0 ? sideways(meas, part, "sa_obs", part.kind)
+                                                              : sideways(meas, edge, "sa_obs", edge.kind);
+    if (part && toPart(0)) s += sideways(part, edge, part.kind, edge.kind);
+    if (edge) s += across(...toClique(edge, -1, hubY)(0), edge.separator, edge.kind, "sa_e");
     s += across(between[0], between[1], edgesBox.separator, "sa_e", "e");
     if (system) {
       const [[xs, ys], [xe, ye]] = toClique(system, 1, edgesBox.y + edgesBox.h)(0);
@@ -1160,8 +1290,11 @@ function renderCliques() {
   const pick = (k, list, name) => list.length ? ` <label>${name} <select data-clique="${k}">` +
     list.map((c, i) => `<option value="${i}"${i === cliquePick[k] ? " selected" : ""}>${esc(c.label)}</option>`).join("") + `</select></label>` : "";
   $("#cliques-info").innerHTML = `Click a stack for the next clique (shift-click for the previous), or choose one:` +
-    `${pick("obs", obs, "measurement")}${pick("local", local, "edge")}${pick("systems", systems, "system")}` +
-    ` <label><input type="checkbox" id="clique-inference"${cliqueInference ? " checked" : ""}> Inference</label>`;
+    `${pick("obs", obs, "measurement")}${pick("comp", comp, "component")}${pick("local", local, "edge")}${pick("systems", systems, "system")}` +
+    ` <label><input type="checkbox" id="clique-inference"${cliqueInference ? " checked" : ""}> Inference</label>` +
+    (comp.length ? `<div>An edge of several components holds its own table, P(EdgeOpen | DamageState, RoadOpen) in the BN ` +
+                   `tab, as an edge of one bridge holds P(EdgeOpen | DamageState); each ground-failure component's clique ` +
+                   `hangs off it, sharing its RoadOpen and the shaking it reads.</div>` : "");
 }
 $("#cliques-info").addEventListener("change", e => {
   if (e.target.id === "clique-inference") { cliqueInference = e.target.checked; renderCliques(); return; }
@@ -1197,13 +1330,29 @@ function renderSchema() {
   if (paneOn("schema")) $("#schema-frame").src = src; else $("#schema-frame").dataset.src = src;
 }
 
+function formOf(id) {
+  const f = state.ex?.forms, key = f?.of[id];
+  return key ? { key, ...f.objects[key] } : null;
+}
+// The popup's section: which object draws the variable, its form, and the lines under it (sources, notes).
+function distributionForm(id) {
+  const o = formOf(id);
+  if (!o) return `<details class="dist" open><summary>Distribution</summary><div class="meta">Reading the model…</div></details>`;
+  const head = o.joint ? `${esc(o.key)}: one joint object over ${o.n} variables, this one among them` : esc(o.statement);
+  const own = state.ex.forms.site?.[id];                // a field's site: its own median and sigma
+  return `<details class="dist" open><summary>Distribution</summary><div class="meta">${head}</div>` +
+    (own ? `<div class="meta">${esc(own)}</div>` : "") +
+    `<div class="form">${esc(o.form)}</div>${o.details.map(d => `<div class="meta">${esc(d)}</div>`).join("")}</details>`;
+}
+
 function bnTip(id) {
   const n = state.ex.nodes.find(x => x.id === id), children = state.ex.nodes.filter(x => x.parents.includes(id));
   const pr = probabilities()[n.row], fam = pr && pr.family.quantity === n.quantity ? pr : null;
   return `<b>${esc(n.id)}</b><div>${esc(n.function)}${n.parameter_set ? ` · ${esc(n.parameter_set)}` : ""}</div>` +
          `<div>${n.parents.length} parent${n.parents.length === 1 ? "" : "s"}${n.parents.length && n.parents.length <= 4 ? `: ${n.parents.map(esc).join(", ")}` : ""}</div>` +
          `<div>${children.length} child${children.length === 1 ? "" : "ren"}${children.length && children.length <= 4 ? `: ${children.map(c => esc(c.id)).join(", ")}` : ""}</div>` +
-         (fam ? `<div>P(${esc(fam.family.label)}) = <b class="v">${fmtP(fam.p)}</b></div>` : "");
+         (fam ? `<div>P(${esc(fam.family.label)}) = <b class="v">${fmtP(fam.p)}</b></div>` : "") +
+         (formOf(id) ? `<div class="form">${esc(formOf(id).form)}</div>` : "");
 }
 
 $("#bn").addEventListener("mouseover", e => {
@@ -1549,7 +1698,8 @@ async function selectDecisionTask(id) {
   }
 }
 
-const OBSERVATION_KINDS = {reading: "Ground-motion reading", damage: "Bridge damage", edge: "Road status", system: "Town access"};
+const OBSERVATION_KINDS = {reading: "Ground-motion reading", damage: "Bridge damage", edge: "Road status", road: "Ground failure: road status",
+                           occurrence: "Ground failure: occurred (PGD > 0)", system: "Town access"};
 
 function observationVariables(kind) {
   return Object.entries(state.session?.variables || {}).filter(([name, v]) => v.kind === kind && !(name in state.session.evidence))
@@ -1939,16 +2089,36 @@ async function showNodeDistribution(target) {
   pop.style.left = Math.max(12, Math.min(r.right + 12, innerWidth - 400)) + "px";
   pop.style.top = Math.max(8, Math.min(r.top - 10, innerHeight - 240)) + "px";
   pop.hidden = false;
-  if (!s) { pop.innerHTML = `<b>${esc(id)}</b><p>Start the session in the Roadmap tab to see this node's distribution given the evidence.</p>`; return; }
-  pop.innerHTML = `<b>${esc(id)}</b><p>Reading the samples…</p>`;
+  const table = distributionForm(id) + seriesTable(id);
+  if (!s) { pop.innerHTML = `<b>${esc(id)}</b><p>Start the session in the Roadmap tab to see this node's distribution given the evidence.</p>` + table; return; }
+  pop.innerHTML = `<b>${esc(id)}</b><p>Reading the samples…</p>` + table;
   try {
     const d = await getJSON(`/api/session/node?assembly=${encodeURIComponent(state.ex.assembly.id)}&node=${encodeURIComponent(id)}`);
     if (epoch !== state.epoch) return;
     pop.innerHTML = `<b>${esc(id)}</b>${d.observed ? " · observed" : ""}<div>as of discussion at ${esc(d.at)}</div>` +
-      nodeChart(d) + (d.kind === "continuous" ? `<div class="meta">x: ${esc(d.unit)}, on a log scale</div>` : `<div class="meta">± 2 SE</div>`);
+      nodeChart(d) + (d.kind === "continuous" ? `<div class="meta">x: ${esc(d.unit)}, on a log scale</div>` : `<div class="meta">± 2 SE</div>`) + table;
     pop.style.top = Math.max(8, Math.min(r.top - 10, innerHeight - pop.getBoundingClientRect().height - 8)) + "px";
   } catch (err) { if (epoch === state.epoch) pop.innerHTML = `<b>${esc(id)}</b><p>${esc(err.message)}</p>`; }
 }
+// An edge's series table (edge.open), as its kernel builds it: one row per component, in road order, and one
+// for "all open"; "any" is any state. Under it, the states "open" and "closed" stand for, per component.
+function seriesTable(id) {
+  const t = (state.ex.tables || {})[id];
+  if (!t) return "";
+  const short = c => c.replace(/^[^:]*::/, "");
+  const head = t.columns.map((c, i) => `<th title="${esc(c)}">${esc(i ? short(c) : "edge")}</th>`).join("") + `<th>p</th>`;
+  const body = t.rows.map((r, k) => `<tr>${r.map((c, i) => `<td class="${i ? `cell-${c}` : ""}">${esc(i ? c : (c === "True" ? "open" : "closed"))}</td>`).join("")}` +
+    `<td>${t.p[k]}</td></tr>`).join("");
+  const kinds = {};
+  for (const [v, st] of Object.entries(t.states)) {
+    const k = `open: ${st.open.join(", ")} · closed: ${st.closed.join(", ")}`;
+    (kinds[k] = kinds[k] || []).push(short(v));
+  }
+  const legend = Object.entries(kinds).map(([k, vs]) => `<div>${esc(vs.length > 3 ? `${vs.length} components` : vs.join(", "))}: ${esc(k)}</div>`).join("");
+  return `<details class="series" open><summary>Series table: ${t.rows.length} rows for ${t.columns.length - 1} components (composite states)</summary>` +
+    `<div class="series-scroll"><table class="data">${`<tr>${head}</tr>`}${body}</table></div><div class="meta">${legend}</div></details>`;
+}
+
 document.addEventListener("click", e => {          // the BN viewport's own clicks come through showNodeDistribution
   if (!e.target.closest("#node-pop, #bn-viewport")) $("#node-pop").hidden = true;
 });
@@ -1975,6 +2145,12 @@ $("#theme").addEventListener("click", () => {
   document.documentElement.dataset.theme = dark ? "light" : "dark";
   store.set("theme", document.documentElement.dataset.theme);
   if (state.ex) renderMap();                       // the base map follows the theme
+});
+document.addEventListener("change", e => {
+  if (e.target.id !== "support-source") return;
+  state.supportSource = e.target.value;
+  store.set("supportSource", state.supportSource);
+  renderMap();
 });
 document.addEventListener("change", e => {
   if (e.target.id !== "basemap") return;

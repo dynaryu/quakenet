@@ -84,3 +84,103 @@ def test_path_candidates_end_at_requested_destination_and_have_joint_events():
     assert len(result["rows"]) == 3
     assert all(r["nodes"][0] == "n4" and r["nodes"][-1] == "n1" for r in result["rows"])
     assert all(r["travel_time_h"] > 0 and 0 <= r["p"] <= 1 for r in result["rows"])
+
+
+# ---- inspect: E[T | do(E_i = open), ev] by the clique tree ----------------------------------------------
+
+@pytest.fixture
+def toy_session():
+    import torch
+    from src.builder.bn_builder import build_tbn
+    from src.inference import cliques
+    from src.inference.session import Session
+
+    variables, probs = build_tbn(engine.compile_query({"assembly": "toy-ca/demo"}))
+    torch.manual_seed(0)
+    return Session(cliques.tree(probs), probs, variables, sampler={"n_chain": 20, "n_burn": 5, "n_keep": 50})
+
+
+def _by_intervening(s, spec):
+    """VOI_i as before: every column of edge i's closed rows, E_i set open and every system evaluated again."""
+    import torch
+    from src.inference.session import _comps, _edge_label
+
+    now, out = s._target(spec["target"], s.rows), {}
+    for c in [c for c in s.t["edges"] if _comps(c) and c["E"] not in s.evidence]:
+        closed, F = s.rows[c["E"]] == 0, torch.zeros(s.n, 1, dtype=torch.float64)
+        if closed.any():
+            sub = {k: v[closed] for k, v in s.rows.items()}
+            F[closed, 0] = now[closed] - s._target(spec["target"], s._intervene({c["E"]: 1}, sub))
+        out[_edge_label(c)] = s._means(F)[0][0].item()
+    return out
+
+
+@pytest.mark.parametrize("target", [{"kind": "cut_off"}, {"kind": "fail", "origin": "n3"}, {"kind": "closed", "edge": "e2"},
+                                    {"kind": "cut_off_at_least", "at_least": 2}])
+def test_inspect_passes_only_the_system_messages_again_and_agrees_with_evaluating_everything(toy_session, target):
+    spec = {"target": target, "decision": "inspect"}
+    got, ref = toy_session._values(spec), _by_intervening(toy_session, spec)
+    assert got.keys() == ref.keys() and all(abs(got[k][0] - ref[k]) < 1e-9 for k in ref)
+
+
+def test_the_system_message_learns_rules_from_the_rows_they_leave_and_keeps_them(toy_session):
+    """system_down decides every row by the rsr rules: with none stored, it learns them from the rows (rsr with
+    the rows as its samples) and keeps them, so the next message learns nothing; the rules agree with the system
+    function on every row."""
+    import torch
+    from src.inference import cliques
+
+    t = toy_session.t
+    k, prob = next(iter(t["systems"].items()))
+    e = torch.stack([toy_session.rows[v.name] for v in prob.parents], dim=1).long()
+    prob.rules = None
+    first, n_learnt = cliques.system_down(t, k, e, {})
+    assert prob.rules is not None and n_learnt > 0
+    assert torch.equal(first, prob.evaluate(e.double())[:, 0].long())
+    again, n_again = cliques.system_down(t, k, e, {})
+    assert torch.equal(again, first) and n_again == 0
+
+
+def test_inspect_with_a_system_observed_opens_the_edge_in_the_rows_the_evidence_left(toy_session):
+    """The observed system state is the one before the repair: each row keeps it until E_i opens, then its system
+    is passed down again; the tree is not sampled again under do (where it could not hold)."""
+    toy_session.observe("SystemState::n3", 0)
+    spec = {"target": {"kind": "fail", "origin": "n3"}, "decision": "inspect"}
+    got, ref = toy_session._values(spec), _by_intervening(toy_session, spec)
+    assert got.keys() == ref.keys() and all(abs(got[k][0] - ref[k]) < 1e-9 for k in ref)
+    assert any(v > 0 for v, _ in got.values())
+
+
+def test_rules_learnt_by_the_system_message_are_stored_with_the_system(toy_session, tmp_path, monkeypatch):
+    """A system's own rules, extended from the rows they leave undecided, are written back to its rsr folder:
+    the .json references and the .pt tensors alike, with what was learnt recorded in its model.json."""
+    import json
+    import shutil
+
+    import torch
+    from src.inference import cliques
+
+    t = toy_session.t
+    k, prob = next(iter(t["systems"].items()))
+    ref = prob.rules_reference
+    for side in ("upper", "lower"):                      # a copy of the stored rules, emptied
+        src = prob.rules_directory / ref[side]
+        dst = tmp_path / ref[side]
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src.parent / "model.json", dst.parent / "model.json")
+        json.dump(json.loads(src.with_suffix(".json").read_text(encoding="utf-8"))[:0],
+                  open(dst.with_suffix(".json"), "w", encoding="utf-8"))
+        torch.save(torch.load(src, weights_only=True)[:0], dst)
+    monkeypatch.setattr(prob, "rules_directory", tmp_path)
+    monkeypatch.setattr(prob, "rules", tuple(torch.load(tmp_path / ref[s], weights_only=True) for s in ("upper", "lower")))
+    monkeypatch.setenv("QUAKENET_SAVE_RULES", "1")
+
+    e = torch.stack([toy_session.rows[v.name] for v in prob.parents], dim=1).long()
+    states, n_learnt = cliques.system_down(t, k, e, {})
+    assert n_learnt > 0 and torch.equal(states, prob.evaluate(e.double())[:, 0].long())
+    for side, mat in zip(("upper", "lower"), prob.rules):
+        stored = torch.load(tmp_path / ref[side], weights_only=True)
+        refs = json.loads((tmp_path / ref[side]).with_suffix(".json").read_text(encoding="utf-8"))
+        assert torch.equal(stored, mat) and len(refs) == len(stored)
+    meta = json.loads(((tmp_path / ref["upper"]).parent / "model.json").read_text(encoding="utf-8"))
+    assert meta["learnt_from_samples"]["sfun_calls"] == n_learnt

@@ -1,0 +1,70 @@
+{
+  "$schema": "../meta/function.schema.json",
+  "id": "hazard.shakemap.ground",
+  "label": "USGS ShakeMap: ln IM at the ground-failure components as a Gaussian field",
+  "version": "0.1.0",
+  "role": "hazard",
+  "per": "GroundFailure",
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "im",
+      "quantity": "{imt}"
+    }
+  ],
+  "attributes": [
+    "lat",
+    "lon"
+  ],
+  "instance_schema": {
+    "type": "object",
+    "required": [
+      "event_id",
+      "imt"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "version": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 1
+      },
+      "source": {
+        "enum": [
+          "auto",
+          "shakecast",
+          "comcat",
+          null
+        ]
+      },
+      "imt": {
+        "description": "Which of the map's grids: PGA, PGV, PSA03, PSA10 or PSA30, with STD<field> from uncertainty.xml.",
+        "enum": [
+          "PGA",
+          "PGV",
+          "SA(0.3)",
+          "SA(1.0)",
+          "SA(3.0)"
+        ]
+      }
+    }
+  },
+  "correlation_model": "spatial-correlation",
+  "implementation": "src.builder.kernels.hazard:ShakeMap",
+  "deterministic": false,
+  "drawKind": "Joint",
+  "capabilities": [
+    "SampleForward",
+    "EvaluateLikelihood"
+  ],
+  "source": {
+    "citation": "USGS ShakeMap grid.xml and uncertainty.xml, PSA(1.0 s), read through src/builder/shakemap.py."
+  },
+  "description": "hazard.shakemap on the GroundFailure plate: ln IM at each component from grid.xml and uncertainty.xml, one Gaussian field over the bound rows, correlated by the binding's set. The ground-failure functions read PGV (occurrence) and PGA (displacement), so an assembly binds it twice, once per IM. The two fields, and these and the bridges' field, are independent of each other: a simplification, as the IMs at one site are correlated."
+}

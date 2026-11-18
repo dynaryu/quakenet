@@ -1,0 +1,48 @@
+{
+  "$schema": "../meta/function.schema.json",
+  "id": "system.reachable",
+  "label": "Destination reachable from its source",
+  "version": "0.2.0",
+  "role": "system",
+  "per": "Support",
+  "inputs": [
+    {
+      "name": "open",
+      "quantity": "EdgeOpen",
+      "over": "Edge",
+      "via": "*",
+      "description": "Every random edge's state; an edge that cannot close (fixed_open) is in the graph, always open, but not a parent.",
+      "where": {
+        "fixed_open": [
+          false,
+          null
+        ]
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "state",
+      "quantity": "SystemState",
+      "description": "Survival if the row's origin is connected by open edges, whatever the detour, to its source, or with no source to any key destination; else Fail."
+    }
+  ],
+  "attributes": [
+    "origin"
+  ],
+  "tables": [
+    "Node",
+    "Edge"
+  ],
+  "implementation": "src.builder.kernels.system:Reachable",
+  "deterministic": true,
+  "drawKind": "Joint",
+  "capabilities": [
+    "SampleForward",
+    "EvaluateLikelihood"
+  ],
+  "source": {
+    "citation": "Graph connectivity (networkx), over the open edges."
+  },
+  "description": "For each Support row, whether its origin is still connected to its source (or, for a row without one, to at least one key destination) over the open edges, regardless of travel time. Edges that cannot close are part of the graph and always open. One binding per source (where source = ...) gives one system layer per source; a binding where source is null gives the any-source layer."
+}

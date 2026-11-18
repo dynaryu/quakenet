@@ -67,7 +67,8 @@
             "number",
             "integer",
             "string",
-            "boolean"
+            "boolean",
+            "path"
           ]
         },
         "ref": {

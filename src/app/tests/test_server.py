@@ -56,7 +56,8 @@ def post(url, body):
 
 def test_view_data_has_the_schema_and_every_bn():
     views = {v["id"]: v for v in view_data()["views"]}
-    assert set(views) == {"library", "ema-highway/gmm", "ema-highway/shakemap", "toy-ca/demo", "toy-ca/shakemap"}
+    assert set(views) == {"library", "ema-highway/gmm", "ema-highway/shakemap", "toy-ca/demo", "toy-ca/shakemap",
+                          "kahramanmaras-2023/shakemap"}
     links = {(x["from"], x["to"]) for x in views["library"]["links"]}
     for hazard in ("hazard.gmm", "hazard.shakemap"):
         assert (hazard, "fragility.bridge") in links          # alternatives, all type-compatible
@@ -158,8 +159,10 @@ def test_inference_failures_return_json_instead_of_dropping_the_connection(
 def test_an_example_carries_its_network_menu_and_rules(base_url):
     status, body = get(base_url + "/api/examples")
     examples = {e["id"]: e for e in json.loads(body)["examples"]}
-    assert status == 200 and set(examples) == {"toy-ca/demo", "toy-ca/shakemap", "ema-highway/gmm", "ema-highway/shakemap"}
-    assert {i for i, e in examples.items() if e["shakemap"]} == {"toy-ca/shakemap", "ema-highway/shakemap"}
+    assert status == 200 and set(examples) == {"toy-ca/demo", "toy-ca/shakemap", "ema-highway/gmm", "ema-highway/shakemap",
+                                               "kahramanmaras-2023/shakemap"}
+    assert {i for i, e in examples.items() if e["shakemap"]} == {"toy-ca/shakemap", "ema-highway/shakemap",
+                                                                 "kahramanmaras-2023/shakemap"}
     status, body = get(base_url + "/api/example?assembly=toy-ca/demo")
     ex = json.loads(body)
     assert status == 200 and set(ex["network"]["tables"]) >= {"Node", "Edge", "Bridge", "Event", "SystemEvent"}
@@ -397,12 +400,13 @@ def test_recent_earthquakes_merge_the_networks_searches(base_url, monkeypatch):
     monkeypatch.setattr(server, "_recent", {})
     status, body = get(base_url + "/api/recent-earthquakes")
     events = {e["event_id"]: e for e in json.loads(body)["events"]}
-    assert status == 200 and len(calls) == 2 and all(m == 4.0 for _, m in calls)
-    assert events["both"]["networks"] == ["ema-highway", "toy-ca"]
-    assert events["both"]["assemblies"] == ["ema-highway/shakemap", "toy-ca/shakemap"]
-    assert events["ca1"]["assemblies"] == ["toy-ca/shakemap"] and events["ne1"]["networks"] == ["ema-highway"]
+    assert status == 200 and len(calls) == 3 and all(m == 4.0 for _, m in calls)
+    assert events["both"]["networks"] == ["ema-highway", "kahramanmaras-2023", "toy-ca"]
+    assert events["both"]["assemblies"] == ["ema-highway/shakemap", "kahramanmaras-2023/shakemap", "toy-ca/shakemap"]
+    assert events["ca1"]["assemblies"] == ["toy-ca/shakemap"]
+    assert events["ne1"]["networks"] == ["ema-highway", "kahramanmaras-2023"]   # the fake search gives both the same id
     get(base_url + "/api/recent-earthquakes")
-    assert len(calls) == 2                                   # asked again within a minute: from memory
+    assert len(calls) == 3                                   # asked again within a minute: from memory
 
     def offline(self, *a, **k):
         raise shakemap.ShakeMapError("could not reach the USGS catalogue: offline")

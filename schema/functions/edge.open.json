@@ -1,8 +1,8 @@
 {
   "$schema": "../meta/function.schema.json",
   "id": "edge.open",
-  "label": "Edge open unless a bridge on it is damaged to a closing state",
-  "version": "0.2.0",
+  "label": "Edge open unless a bridge or a ground-failure component on it closes it",
+  "version": "0.5.0",
   "role": "edge",
   "per": "Edge",
   "inputs": [
@@ -12,6 +12,36 @@
       "over": "Bridge",
       "via": "Bridge.edge",
       "description": "The damage state of every bridge whose `edge` is this edge, on the damage scale the closure policy is written for: zero, one or several parents."
+    },
+    {
+      "name": "liquefaction",
+      "quantity": "RoadOpen.Liquefaction",
+      "over": "GroundFailure",
+      "via": "GroundFailure.edge",
+      "where": {
+        "kind": "liquefaction"
+      },
+      "description": "The road state at every liquefaction component on this edge."
+    },
+    {
+      "name": "landslide",
+      "quantity": "RoadOpen.Landslide",
+      "over": "GroundFailure",
+      "via": "GroundFailure.edge",
+      "where": {
+        "kind": "landslide"
+      },
+      "description": "The road state at every landslide component on this edge."
+    },
+    {
+      "name": "fault",
+      "quantity": "RoadOpen.FaultRupture",
+      "over": "GroundFailure",
+      "via": "GroundFailure.edge",
+      "where": {
+        "kind": "fault"
+      },
+      "description": "The road state at every fault crossing on this edge."
     }
   ],
   "outputs": [
@@ -19,6 +49,10 @@
       "name": "open",
       "quantity": "EdgeOpen"
     }
+  ],
+  "tables": [
+    "Bridge",
+    "GroundFailure"
   ],
   "instance_schema": {
     "type": "object",
@@ -78,5 +112,5 @@
     "SampleForward",
     "EvaluateLikelihood"
   ],
-  "description": "Each bridge sits on one edge (Bridge.edge). The edge is open only if every bridge on it is in a damage state its closure policy keeps open, the parameter set's usable_states; an edge with no bridge is always open, as only bridges are fragile in this library. A roadway fragility would add a second input here."
+  "description": "Each bridge and each ground-failure component sits on one edge. The edge is open only if every bridge on it is in a damage state its closure policy keeps open and the road stays open at every ground-failure component on it, whatever its mechanism: they act in series. The CPT is a composite-state table (Byun & Song 2021): with the components in road order (chainage_km, read from the Bridge and GroundFailure tables; the binding's order where a component has none), row i says the first i-1 are open, the i-th is closed and the rest are in any state (edge closed), and the last row says every one is open (edge open): n + 1 disjoint rows for n components, instead of one row per combination of their states. Bind it to the edges that can close (where fixed_open is false); an edge that cannot is not a random variable."
 }

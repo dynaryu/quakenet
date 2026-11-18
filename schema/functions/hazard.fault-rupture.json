@@ -1,0 +1,95 @@
+{
+  "$schema": "../meta/function.schema.json",
+  "id": "hazard.fault-rupture",
+  "label": "Fault crossing: how far the road is offset (0 without surface rupture)",
+  "version": "0.4.0",
+  "role": "hazard",
+  "per": "GroundFailure",
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "pgd",
+      "quantity": "PGD.FaultOffset"
+    }
+  ],
+  "attributes": [
+    "lat",
+    "lon",
+    "slip_type",
+    "fault_id"
+  ],
+  "instance_schema": {
+    "type": "object",
+    "required": [
+      "event_id",
+      "model"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "The scenario's USGS event id, whose magnitude (and rupture model) the function reads: the same map hazard.shakemap reads. The page sets it for every binding when an earthquake is chosen."
+      },
+      "version": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 1
+      },
+      "source": {
+        "enum": [
+          "auto",
+          "shakecast",
+          "comcat",
+          null
+        ]
+      },
+      "model": {
+        "type": "object",
+        "required": [
+          "on_rupture_km",
+          "p_surface_rupture",
+          "average_displacement"
+        ],
+        "properties": {
+          "on_rupture_km": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "A crossing within this distance of the rupture model's top edge is on the rupture."
+          },
+          "p_surface_rupture": {
+            "type": "object",
+            "description": "P(surface rupture | M) = 1 / (1 + exp(-(a + b M))), Wells & Coppersmith (1993)."
+          },
+          "average_displacement": {
+            "type": "object",
+            "description": "Wells & Coppersmith (1994) log10 AD = a + b M with sigma_log10, by slip type (strike-slip, all): the segment average where segment_offsets gives none."
+          },
+          "on_trace_fraction": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "description": "The share of the segment's average offset taken up at the mapped trace, where the road crosses; the rest is spread off it. 1 when left out."
+          },
+          "segment_offsets": {
+            "type": "object",
+            "description": "Measured average offsets of a scenario's rupture segments: {event_id: {source, sigma_ln, faults: {catalogue fault_id: {segment, average_m}}}}. A crossing whose fault is listed for the scenario takes its segment's average, with sigma_ln, in place of Wells & Coppersmith."
+          }
+        }
+      }
+    }
+  },
+  "implementation": "src.builder.kernels.ground:FaultPGD",
+  "deterministic": false,
+  "drawKind": "Marginal",
+  "capabilities": [
+    "SampleForward",
+    "EvaluateLikelihood"
+  ],
+  "source": {
+    "citation": "Rupture geometry: the scenario ShakeMap's rupture.json. Wells & Coppersmith (1993) probability of surface rupture given M, as used by Youngs et al. (2003) and Petersen et al. (2011); coefficients not checked against the paper. Given it occurs: Wells & Coppersmith (1994) BSSA 84:974, Table 2B, average displacement on M. Measured segment averages, where an assembly gives them, are cited by the assembly."
+  },
+  "description": "A root. The crossing is on the scenario's rupture if it lies within on_rupture_km of the top edge of the ShakeMap's rupture model; there the fault ruptures to the surface with P = 1 / (1 + exp(-(a + b M))), elsewhere with P = 0. Given surface rupture, PGD is lognormal about the offset at the trace: on_trace_fraction times the segment's average offset. The average is the scenario's measured one for the crossed fault's segment where segment_offsets gives it (by the row's fault_id), with its sigma_ln; else the Wells & Coppersmith (1994) average displacement for M (strike-slip where the fault's slip type is sinistral or dextral, else all slip types), with theirs. Else PGD = 0. Occurrence is the event PGD > 0."
+}

@@ -30,6 +30,7 @@ Standard library and numpy only.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -444,6 +445,19 @@ class ComcatSource:
             raise ShakeMapError(f"USGS has no ShakeMap for event {event_id!r}")
         return _product_version(products[0])
 
+    def fetch_file(self, event_id: str, version: int, name: str, path: Path) -> bool:
+        """Download one more file of a cached ShakeMap version (e.g. rupture.json) to path.
+        Returns False if that version does not have it."""
+        detail = self._get_json({"eventid": event_id, "format": "geojson", "includesuperseded": "true"})
+        for product in detail.get("properties", {}).get("products", {}).get("shakemap") or []:
+            if _product_version(product) == int(version):
+                entry = product.get("contents", {}).get(f"download/{name}")
+                if entry:
+                    self._download(entry["url"], path)
+                    return True
+                return False
+        return False
+
     def _superseded(self, event_id: str, preferred: dict[str, Any], version: int) -> dict[str, Any]:
         """An earlier version of the preferred ShakeMap (same contributing network and code)."""
         detail = self._get_json({"eventid": event_id, "format": "geojson", "includesuperseded": "true"})
@@ -465,7 +479,8 @@ class ComcatSource:
             raise ShakeMapError(f"version {version} of the ShakeMap for {event_id!r} has no grid.xml")
         target.mkdir(parents=True, exist_ok=True)
         # grid.xml last: its presence is what marks a cached version complete.
-        for name in ("uncertainty.xml", "grid.xml"):
+        # rupture.json (the finite-fault model) is optional; the fault-rupture function reads it.
+        for name in ("rupture.json", "uncertainty.xml", "grid.xml"):
             entry = contents.get(f"download/{name}")
             if entry:
                 self._download(entry["url"], target / name)
@@ -594,6 +609,49 @@ def load(event_id: str, source: str | None = None, version: int | None = None, i
     # One folder always comes from one source, so recording it on the shared grid is safe.
     grid.meta["source"] = hit[2]
     return grid
+
+
+def rupture_path(event_id: str, source: str | None = None, version: int | None = None) -> Path | None:
+    """The finite-fault model (rupture.json) of the ShakeMap load() resolves, fetched beside its grids if
+    the cached folder lacks it; None if that ShakeMap has none or it cannot be fetched."""
+    load(event_id, source, version, "PGA")
+    src = get_source(source)
+    folder = Path(_resolved[(src.name, str(event_id), None if version is None else int(version))][1])
+    path = folder / "rupture.json"
+    if path.is_file():
+        return path
+    number = _int(folder.name.rsplit("-", 1)[-1])
+    if number is None:
+        return None
+    try:
+        return path if ComcatSource().fetch_file(str(event_id), number, "rupture.json", path) else None
+    except ShakeMapError:
+        return None
+
+
+def distance_to_top_edge_km(path: Path | str, lat: float, lon: float) -> float:
+    """Shortest distance (km) from (lat, lon) to the top edge of a rupture.json's fault planes: in each
+    polygon, the vertices at its shallowest depth (within 0.5 km), in order, as a line; inf if it has none."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    kx, ky = 111.32 * math.cos(math.radians(lat)), 110.57
+    best = math.inf
+    for feature in data.get("features", []):
+        geometry = feature.get("geometry") or {}
+        polys = geometry.get("coordinates") or []
+        if geometry.get("type") == "Polygon":
+            polys = [polys]
+        for poly in polys:
+            for ring in poly:
+                if not ring or len(ring[0]) < 3:
+                    continue
+                top = min(p[2] for p in ring)
+                line = [((p[0] - lon) * kx, (p[1] - lat) * ky) for p in ring if p[2] <= top + 0.5]
+                for (x1, y1), (x2, y2) in zip(line, line[1:] or line):
+                    dx, dy = x2 - x1, y2 - y1
+                    seg = dx * dx + dy * dy
+                    t = 0.0 if seg == 0 else max(0.0, min(1.0, -(x1 * dx + y1 * dy) / seg))
+                    best = min(best, math.hypot(x1 + t * dx, y1 + t * dy))
+    return best
 
 
 def bbox(rows: Iterable[dict[str, Any]], margin_deg: float = 1.0) -> tuple[float, float, float, float]:

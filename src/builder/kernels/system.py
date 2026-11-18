@@ -47,6 +47,135 @@ def base_graph(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> nx.G
     return graph
 
 
+_COMPONENTS: dict[Any, tuple[str, Any]] = {}     # graph key -> (digest of the edge-state rows, their component labels)
+
+
+def _component_labels(key, n_nodes, u, v, fixed_u, fixed_v, rows):
+    """Connected-component labels (U, n_nodes) of the graph under each distinct edge-state row (U, n_edges)
+    of 0/1, the edges that cannot close (fixed_u, fixed_v) always in it. Every Reachable object on one
+    network asks with the same rows in turn, so the last answer is kept per graph and shared."""
+    import hashlib
+
+    import numpy as np
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    arr = np.ascontiguousarray(rows, dtype=np.bool_)
+    digest = hashlib.sha1(arr.tobytes() + str(arr.shape).encode()).hexdigest()
+    hit = _COMPONENTS.get(key)
+    if hit is not None and hit[0] == digest:
+        return hit[1]
+    labels = np.empty((len(arr), n_nodes), dtype=np.int32)
+    for r, mask in enumerate(arr):
+        check_cancelled()
+        uu, vv = np.concatenate([u[mask], fixed_u]), np.concatenate([v[mask], fixed_v])
+        graph = coo_matrix((np.ones(len(uu)), (uu, vv)), shape=(n_nodes, n_nodes))
+        labels[r] = connected_components(graph, directed=False)[1]
+    _COMPONENTS[key] = (digest, labels)
+    return labels
+
+
+class Reachable(Probability):
+    """Whether an origin is still connected to its source (or, with none, to any key destination), given
+    every random edge's state (deterministic).
+
+        S = Survival if the origin is connected to the source by open edges (any detour), else Fail
+
+    The graph is the whole network: an edge that is not a parent (fixed_open) cannot close and is always in
+    it. evaluate() decides connectivity directly, once per distinct edge state; the clique tree's message
+    decides S by the rsr rules instead, learning them further from the rows they leave undecided, with this
+    as the system function (src/inference/cliques.py, system_down). Stored rules are also the certificates
+    an observation of S is entered with.
+    """
+
+    def __init__(self, childs, parents, origin, edge_ids, network, destination=None, rules=None, directory=None,
+                 device="cpu"):
+        """
+        childs      : [Variable S], values ["Fail", "Survival"]
+        parents     : [Variable EdgeOpen] of every random edge, values ["False", "True"]
+        origin      : the node to be reached
+        edge_ids    : the network's edge id of each parent, in the same order
+        network     : the Node and Edge tables, or the name of a JSON file holding them (relative to directory)
+        destination : the source node support comes from; None for any node marked key_destination
+        rules       : {"upper": survival rules file, "lower": failure rules file} relative to directory, or None
+        """
+        import numpy as np
+
+        super().__init__(childs, parents, device)
+        assert len(childs) == 1 and len(edge_ids) == len(parents), "Reachable: one S child, one edge id per parent"
+        if isinstance(network, str):
+            network = json.loads((Path(directory) / network).read_text(encoding="utf-8"))
+        self.origin, self.destination = origin, destination
+        self.targets = [destination] if destination else [n["id"] for n in network["Node"] if n.get("key_destination")]
+        if not self.targets:
+            raise ValueError("no source given and no node is a key_destination")
+        self.edge_ids = list(edge_ids)
+        graph = base_graph(network["Node"], network["Edge"])
+        ends = {d["eid"]: (u, v) for u, v, d in graph.edges(data=True)}
+        index = {n: i for i, n in enumerate(graph.nodes)}
+        self._n_nodes = len(index)
+        self._index = index
+        self._ends = [ends[e] for e in self.edge_ids]
+        fixed = [uv for e, uv in ends.items() if e not in set(self.edge_ids)]
+        self._u = np.array([index[a] for a, _ in self._ends], dtype=np.int64)
+        self._v = np.array([index[b] for _, b in self._ends], dtype=np.int64)
+        self._fu = np.array([index[a] for a, _ in fixed], dtype=np.int64)
+        self._fv = np.array([index[b] for _, b in fixed], dtype=np.int64)
+        self._o, self._t = index[origin], [index[t] for t in self.targets]
+        self._key = (self._n_nodes, tuple(self.edge_ids), len(fixed))
+        self.rules_reference = rules
+        self.rules_directory = None if directory is None else Path(directory)   # rules are relative to it
+        self.rules = None if rules is None else self._load_rules(rules, Path(directory))
+        self.tally = Tally(seen=0, unclassified=0)
+        if not any(nx.has_path(graph, origin, t) for t in self.targets):
+            self.notes.add(f"{origin} is not connected to {self._target_text()} even with every edge open, so it always fails")
+
+    def _load_rules(self, rules, directory):
+        empty = torch.empty((0, len(self.edge_ids), 2), dtype=torch.int32, device=self.device)
+        return tuple(torch.load(directory / rules[side], map_location=self.device, weights_only=True)
+                     if rules.get(side) else empty for side in ("upper", "lower"))
+
+    def _target_text(self):
+        return self.destination or "any key destination (" + ", ".join(self.targets) + ")"
+
+    def form(self):
+        return f"Survival if {self.origin} is connected to {self._target_text()} over the open edges, else Fail"
+
+    def form_details(self):
+        rules = ("none" if self.rules is None else
+                 f"{len(self.rules[0])} survival and {len(self.rules[1])} failure reference sets")
+        return [f"rules: {rules}"] + super().form_details()
+
+    def _states(self, rows):
+        import numpy as np
+
+        labels = _component_labels(self._key, self._n_nodes, self._u, self._v, self._fu, self._fv, rows)
+        return (labels[:, [self._o]] == labels[:, self._t]).any(axis=1)
+
+    def system_function(self):
+        """{edge id: 0 or 1} -> (None, S, None), as the travel-time kernel's; edges left out are open."""
+        import numpy as np
+
+        def evaluate(comps):
+            row = np.array([[comps.get(e, 1) for e in self.edge_ids]], dtype=np.bool_)
+            return None, int(self._states(row)[0]), None
+        return evaluate
+
+    def evaluate(self, Cs_pars):
+        """
+        Cs_pars : (N, n_edges) EdgeOpen of each random edge, in the order of edge_ids
+        Returns (N, 1) S index: 1 Survival, 0 Fail
+        """
+        check_cancelled()
+        if ((Cs_pars != 0) & (Cs_pars != 1)).any():
+            raise ValueError("edge states must be binary")
+        distinct, inverse = torch.unique(Cs_pars.long(), dim=0, return_inverse=True)
+        out = self.tensor(self._states(distinct.cpu().numpy()))
+        self.tally["seen"] += len(Cs_pars)
+        self.tally["unclassified"] += len(Cs_pars)
+        return out[inverse][:, None]
+
+
 class TravelTimeToNearest(Probability):
     """Whether an origin still reaches a key destination in time, given every edge's state (deterministic).
 
@@ -90,6 +219,7 @@ class TravelTimeToNearest(Probability):
         self.edge_ids = list(edge_ids)
         self.target_add_h = float(target_add_h)
         self.rules_reference = rules
+        self.rules_directory = None if directory is None else Path(directory)   # rules are relative to it
         self.rules = None if rules is None else self._load_rules(rules, Path(directory))
         self.tally = Tally(seen=0, unclassified=0)
 

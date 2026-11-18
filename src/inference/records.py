@@ -122,7 +122,8 @@ def load_samples(record: Mapping[str, Any]) -> dict[str, np.ndarray] | None:
 def log_query(result: dict[str, Any], compiled: Any, bindings: set[int], bank: Mapping[str, Any],
               context: Mapping[str, Any]) -> dict[str, Any]:
     """Append a query record; returns what the result reports about it."""
-    from src.builder.bn_builder import _tbn_fingerprint, tbn_data
+    from src.builder.bn_builder import _tbn_fingerprint
+    from src.builder.builders import tbn_data
 
     record_id = new_id()
     stored = {"bank": bank["path"].relative_to(directory()).as_posix() if bank["path"] else None,

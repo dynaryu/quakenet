@@ -156,6 +156,19 @@
         },
         "description": {
           "type": "string"
+        },
+        "where": {
+          "description": "Only parent rows whose attributes equal these values (or lie in a list of values); null matches a row that leaves the attribute out. The other rows are not parents through this port.",
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "array",
+              "null"
+            ]
+          }
         }
       }
     },

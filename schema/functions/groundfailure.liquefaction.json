@@ -1,0 +1,92 @@
+{
+  "$schema": "../meta/function.schema.json",
+  "id": "groundfailure.liquefaction",
+  "label": "Liquefaction: how far the ground moves (0 where it does not liquefy)",
+  "version": "0.4.0",
+  "role": "hazard",
+  "per": "GroundFailure",
+  "inputs": [
+    {
+      "name": "pgv",
+      "quantity": "PGV",
+      "over": "GroundFailure",
+      "via": "self",
+      "description": "PGV at the component, in cm/s: the shaking the occurrence model reads."
+    },
+    {
+      "name": "pga",
+      "quantity": "PGA",
+      "over": "GroundFailure",
+      "via": "self",
+      "description": "PGA at the component, in g: below the model's floor the ground does not fail."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "pgd",
+      "quantity": "PGD.Liquefaction"
+    }
+  ],
+  "attributes": [
+    "x0",
+    "length_km",
+    "liq_class",
+    "dw_km"
+  ],
+  "instance_schema": {
+    "type": "object",
+    "required": [
+      "event_id",
+      "model"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "The scenario's USGS event id, whose magnitude (and rupture model) the function reads: the same map hazard.shakemap reads. The page sets it for every binding when an earthquake is chosen."
+      },
+      "version": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 1
+      },
+      "source": {
+        "enum": [
+          "auto",
+          "shakecast",
+          "comcat",
+          null
+        ]
+      },
+      "model": {
+        "type": "object",
+        "required": [
+          "zhu2017",
+          "patch_m",
+          "hazus"
+        ],
+        "properties": {
+          "lateral_spread_within_km": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Hazus lateral spread needs a free face: it applies only to stretches within this distance of water (the row's dw_km standing in for the distance to a free face); farther, the stretch only settles. Left out, lateral spread applies everywhere."
+          }
+        }
+      }
+    }
+  },
+  "implementation": "src.builder.kernels.ground:LiquefactionPGD",
+  "deterministic": false,
+  "drawKind": "Marginal",
+  "capabilities": [
+    "SampleForward",
+    "EvaluateLikelihood"
+  ],
+  "source": {
+    "citation": "Zhu, Baise & Thompson (2017) BSSA 107:1365, general model, as USGS gfail implements it (code.usgs.gov ghsc/esi/groundfailure, zhu_2017.py, commit fa7bd28). Given it occurs: Hazus 6.1 Technical Manual Sec. 4.2.2 lateral spreading and settlement, as OpenQuake implements them (github.com/gem/oq-engine openquake/sep/liquefaction, commit 0f9c75e)."
+  },
+  "description": "PGD = 0 with probability 1 - P, P = P(liquefies) = 1 - (1 - f)^(L / patch), f = Zhu et al. (2017)'s areal coverage at x0 + b_pgv ln(min(PGV, clip) MSF(M)), MSF = 1 / (1 + exp(-2 (M - 6))), M the ShakeMap's magnitude, 0 below its PGV and PGA floors (patches of length 'patch' along the stretch taken as independent). Given it liquefies, PGD = the larger of the Hazus lateral spread, K_delta(M) a(PGA / PGA_t) inches (a = 12r - 12, 18r - 24, 70r - 180 over r = PGA / PGA_t in (1, 2], (2, 3], > 3; 0 for r <= 1), and the class's settlement: a fixed value given PGA. Where the model sets lateral_spread_within_km and the stretch is farther than that from water (dw_km), it has no free face and only settles. Occurrence is the event PGD > 0."
+}

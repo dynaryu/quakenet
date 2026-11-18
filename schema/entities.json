@@ -85,6 +85,16 @@
           "type": "number",
           "unit": "km/h",
           "description": "Average travel speed on this edge; travel time is length_km / avg_speed_kph."
+        },
+        "fixed_open": {
+          "type": "boolean",
+          "required": false,
+          "description": "True for an edge that cannot close (nothing on it can fail): it stays in the graph the system functions evaluate, always open, but is not a random variable, so no EdgeOpen node is made for it. Left out (or false) for an edge that can close."
+        },
+        "geometry": {
+          "type": "path",
+          "required": false,
+          "description": "The road's course from source to target, as [lat, lon] points (the end nodes included), for drawing only. Left out, the edge is drawn as a straight line."
         }
       }
     },
@@ -104,6 +114,13 @@
           "ref": "Edge",
           "description": "The edge this bridge carries. An edge with several bridges is open only if every one is in a damage state its closure policy keeps open."
         },
+        "chainage_km": {
+          "type": "number",
+          "unit": "km",
+          "required": false,
+          "minimum": 0,
+          "description": "Distance along its edge from the edge's source node. Orders the edge's components in its series table (edge.open); left out, they keep the binding's order."
+        },
         "hazus_class": {
           "type": "string",
           "description": "HWB1 ... HWB28; selects the fragility parameter set."
@@ -121,6 +138,102 @@
         }
       },
       "description": "A bridge, where it is and what kind it is. Its location is what every hazard function reads, so ground motion is one node per bridge."
+    },
+    {
+      "id": "GroundFailure",
+      "label": "Ground-failure component",
+      "description": "A stretch of road exposed to one ground-failure mechanism (liquefaction, landslide) or a crossing of a mapped active fault, placed by exposure, not by what happened. Like a bridge it sits on one edge, and the edge is open only if all its bridges and ground-failure components are. Each mechanism is a chain of its own: occurrence, then permanent ground displacement (PGD), then whether the road stays open. Which attributes a row needs depends on its kind; the functions bound to that kind list them.",
+      "attributes": {
+        "lat": {
+          "type": "number",
+          "unit": "deg"
+        },
+        "lon": {
+          "type": "number",
+          "unit": "deg"
+        },
+        "edge": {
+          "ref": "Edge",
+          "description": "The edge this component lies on."
+        },
+        "chainage_km": {
+          "type": "number",
+          "unit": "km",
+          "required": false,
+          "minimum": 0,
+          "description": "Distance along its edge from the edge's source node. Orders the edge's components in its series table (edge.open); left out, they keep the binding's order."
+        },
+        "kind": {
+          "type": "string",
+          "description": "liquefaction, landslide or fault: which mechanism, and so which hazard function the assembly binds to the row (by where)."
+        },
+        "road_class": {
+          "type": "string",
+          "description": "Hazus roadway class, HRD1 (major road) or HRD2 (other road); selects the roadway fragility on PGD."
+        },
+        "length_km": {
+          "type": "number",
+          "unit": "km",
+          "minimum": 0,
+          "required": false,
+          "description": "Length of the exposed stretch (0 for a fault crossing)."
+        },
+        "x0": {
+          "type": "number",
+          "required": false,
+          "description": "Site term of the occurrence model, its logit without the shaking terms: Zhu et al. (2017) for liquefaction, Nowicki Jessee et al. (2018, USGS 'slim' form) for landslides."
+        },
+        "liq_class": {
+          "type": "string",
+          "required": false,
+          "description": "Hazus liquefaction susceptibility class: vh, h, m, l or vl. Sets the triggering PGA and the settlement."
+        },
+        "dw_km": {
+          "type": "number",
+          "unit": "km",
+          "minimum": 0,
+          "required": false,
+          "description": "Distance from a liquefaction stretch to water (river, canal, lake or coast), its stations' mean. Stands in for the distance to a free face: whether Hazus lateral spread applies."
+        },
+        "slope_deg": {
+          "type": "number",
+          "unit": "deg",
+          "required": false,
+          "description": "Slope of the hillside at the stretch, as the landslide model reads it."
+        },
+        "ac_g": {
+          "type": "number",
+          "unit": "g",
+          "required": false,
+          "description": "Critical (yield) acceleration of the slope for Newmark sliding."
+        },
+        "slip_type": {
+          "type": "string",
+          "required": false,
+          "description": "Slip type of the crossed fault, as its catalogue gives it."
+        },
+        "fault_id": {
+          "type": "string",
+          "required": false,
+          "description": "The crossed fault's catalogue id."
+        }
+      }
+    },
+    {
+      "id": "Support",
+      "label": "Support route",
+      "description": "A destination and a source of support for it: a system function judges whether the destination can still be reached from that source, or, with no source, from any key destination. One row per (destination, source) pair gives one system layer per source.",
+      "attributes": {
+        "origin": {
+          "ref": "Node",
+          "description": "The node to be reached (a destination)."
+        },
+        "source": {
+          "ref": "Node",
+          "required": false,
+          "description": "The node support comes from; left out for 'any source': reachable from at least one node marked key_destination."
+        }
+      }
     },
     {
       "id": "SystemEvent",
