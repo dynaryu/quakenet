@@ -81,3 +81,41 @@ def test_displacement_takes_k_delta_per_stretch():
     r = torch.tensor([0.45 / 0.15])
     d = ground.liquefaction_ln_displacement(r * 0.15, 0.15, 0.0508, torch.tensor([1.2015, 0.0]))
     assert torch.exp(d).tolist() == pytest.approx([30 * 1.2015 * ground.INCH, 0.0508])
+
+
+def test_rules_follow_the_assemblys_recipe_checked_and_resumed(tmp_path, monkeypatch):
+    """Kahramanmaraş's rules are extracted by its own recipe (its assembly's "rsr"): the 0.95 proposal, and each
+    system's rules checked on fresh samples and resumed with the next seed while above the target, up to the cap."""
+    import json
+
+    from src.builder import bn_builder_series as series
+    from src.builder import builders
+
+    try:
+        compiled = engine.compile_query({"assembly": KM})
+    except Exception as exc:
+        pytest.skip(f"the {KM} BN cannot be compiled here: {exc}")
+    assert compiled.assembly["rsr"] == {"proposal": 0.95, "unknown_target": 1e-5, "check_samples": 1_000_000,
+                                        "max_rounds": 10000}
+    calls, shares = [], {"T01-S1": [3e-5, 2e-5, 4e-6], "T02-S1": [1e-6]}
+
+    def extract(compiled, directory, origins, *, seed, proposal, unknown_target, max_rounds, check_samples, resume, log):
+        calls.append((sorted(origins), seed, resume, proposal["p_open_all"], unknown_target, check_samples))
+        for key in origins:
+            folder = series.rules_folder(directory, key, None)
+            folder.mkdir(parents=True, exist_ok=True)
+            runs = len(json.loads((folder / "model.json").read_text())["runs"]) if (folder / "model.json").is_file() else 0
+            (folder / "model.json").write_text(json.dumps({"runs": [{"rounds": 10}] * (runs + 1)}))
+        return sorted(origins)
+
+    monkeypatch.setattr(series, "extract_system_rules", extract)
+    monkeypatch.setattr(series, "unclassified_share", lambda folder, edges, proposal, n, seed:
+                        shares[folder.parent.name].pop(0))
+    done = builders.extract_system_rules(compiled, tmp_path, {"T01-S1", "T02-S1"})
+    assert done == ["T01-S1", "T02-S1"]
+    assert calls == [(["T01-S1", "T02-S1"], 20261022, True, 0.95, 1e-5, 1_000_000),
+                     (["T01-S1"], 20261023, True, 0.95, 1e-5, 1_000_000),
+                     (["T01-S1"], 20261024, True, 0.95, 1e-5, 1_000_000)]
+    meta = json.loads((tmp_path / "rsr/T01-S1/reachable/model.json").read_text())
+    assert [c["unclassified"] for c in meta["checks"]] == [3e-5, 2e-5, 4e-6]
+    assert json.loads((tmp_path / "rsr/proposal.json").read_text())["p_open_all"] == 0.95

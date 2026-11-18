@@ -70,7 +70,10 @@ def rules_status(data: dict[str, Any], directory: Path) -> list[dict[str, Any]]:
 
 def extract_system_rules(compiled: Compiled, directory: Path, origins: set[str] | None = None, **kwargs) -> list[str]:
     """rsr's rules for each system; the options beyond bn_builder.extract_system_rules' (a proposal, resuming)
-    are bn_builder_series.py's."""
+    are bn_builder_series.py's. With no options, an assembly's own rsr recipe ("rsr": its proposal, target,
+    rounds and check samples) is followed, as python -m src rules and the page's Initialise do."""
+    if not kwargs and series(compiled) and compiled.assembly.get("rsr"):
+        return bn_builder_series.recipe_extract(compiled, directory, origins)
     return module(compiled).extract_system_rules(compiled, directory, origins, **kwargs)
 
 

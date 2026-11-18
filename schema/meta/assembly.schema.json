@@ -29,6 +29,22 @@
     "description": {
       "type": "string"
     },
+    "rsr": {
+      "description": "How the systems' rsr rules are extracted (python -m src rules, the page's Initialise), when the defaults would leave many sampled states undecided: the proposal rsr's search draws edge states from (every edge open with this probability, or 'marginal' for each edge's P(open) under the assembly's scenario), the unclassified share to reach, checked on check_samples fresh samples after each run and resumed while above it, and the cap on rounds over all runs. Connectivity networks (bn_builder_series.py) only.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "proposal": {
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+            {"const": "marginal"}
+          ]
+        },
+        "unknown_target": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "check_samples": {"type": "integer", "minimum": 1000},
+        "max_rounds": {"type": "integer", "minimum": 1}
+      }
+    },
     "bindings": {
       "type": "array",
       "minItems": 1,

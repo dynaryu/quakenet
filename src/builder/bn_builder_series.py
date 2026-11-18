@@ -11,8 +11,10 @@ files are bn_builder.py's; this module adds what only these networks need:
 - an edge's series table over its bridges and ground-failure components (edge.open), its rows in road order
   (chainage_km): row k says components 1..k-1 are open and k is closed, the last row that all are open;
 - connectivity systems (system.reachable), whose rsr rules are stored per Support row, with no threshold;
-- for rsr on a network this large: a proposal to search from (uniform_proposal, marginal_proposal), and
-  resuming an extraction that stopped (extract_system_rules(resume=True)).
+- for rsr on a network this large: a proposal to search from (uniform_proposal, marginal_proposal),
+  resuming an extraction that stopped (extract_system_rules(resume=True)), and checking the rules on fresh
+  samples and resuming until they reach their target (extract_until_checked), as the assembly's "rsr" recipe
+  asks (recipe_extract).
 """
 
 from __future__ import annotations
@@ -406,6 +408,84 @@ def _resume_point(folder: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if (folder / "metrics.json").is_file() and runs:
         (folder / "metrics.json").replace(folder / runs[-1]["metrics"])
     return start, runs
+
+
+def unclassified_share(folder: Path, edges: list[str], proposal: dict[str, Any] | None, n_samples: int,
+                       seed: int, batch: int = 100_000) -> float:
+    """The share of n_samples fresh edge-state vectors, drawn from the proposal (50/50 if None), that the rules
+    stored in folder leave undecided: rsr's own estimate is a quick one and can fall below its target early."""
+    import torch
+    from rsr.rsr import classify_samples_with_indices
+
+    rules = tuple(torch.load(folder / f, weights_only=True) for f in ("refs_up_1.pt", "refs_low_0.pt"))
+    p_open = torch.tensor([0.5 if proposal is None else float(proposal["p_open"][e]) for e in edges], dtype=torch.float64)
+    g, left = torch.Generator().manual_seed(seed), 0
+    for begin in range(0, n_samples, batch):
+        x = (torch.rand(min(batch, n_samples - begin), len(edges), generator=g, dtype=torch.float64) < p_open).long()
+        left += classify_samples_with_indices(torch.nn.functional.one_hot(x, 2).to(torch.int32), *rules,
+                                              return_masks=True)["unknown"]
+    return left / n_samples
+
+
+def extract_until_checked(compiled: Compiled, directory: Path, origins: set[str] | None = None, *,
+                          seed: int = 20261022, log: Callable[[str], None] = print,
+                          proposal: dict[str, Any] | None = None, unknown_target: float = RSR_UNKNOWN_TARGET,
+                          max_rounds: int = RSR_MAX_ROUNDS, check_samples: int = 1_000_000) -> list[str]:
+    """extract_system_rules, then each system's rules checked on check_samples fresh samples from the proposal;
+    while the share they leave undecided is unknown_target or more, rsr resumes from them with the next seed and
+    they are checked again, up to max_rounds over all runs. Each check is kept in the system's model.json.
+    Resumes from what is stored, so an interrupted extraction picks up where it stopped."""
+    nodes = {rules_key(node): node for node in ruled_nodes(tbn_data(compiled))
+             if origins is None or rules_key(node) in origins}
+    pending, done, run = set(nodes), set(), 0
+    checks: dict[str, list[dict[str, Any]]] = {}       # each run rewrites model.json: the checks so far are kept here
+    while pending:
+        done |= set(extract_system_rules(compiled, directory, pending, seed=seed + run, log=log, proposal=proposal,
+                                         unknown_target=unknown_target, max_rounds=max_rounds,
+                                         check_samples=check_samples, resume=True))
+        still = set()
+        for key in sorted(pending):
+            node = nodes[key]
+            folder = rules_folder(directory, key, rules_threshold(node))
+            meta_file = folder / "model.json"
+            if not meta_file.is_file():
+                continue
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            share = unclassified_share(folder, node["kwargs"]["edge_ids"], proposal, check_samples, seed + 1000 + run)
+            checks.setdefault(key, []).append({"after_run": len(meta.get("runs", [])), "samples": check_samples,
+                                               "unclassified": share, "seed": seed + 1000 + run})
+            meta["checks"] = checks[key]
+            meta_file.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+            rounds = sum(r.get("rounds", 0) for r in meta.get("runs", []))
+            if share >= unknown_target and rounds < max_rounds:
+                still.add(key)
+            log(f"{key}: {share:.2e} of {check_samples:g} fresh samples undecided after {rounds} rounds" +
+                (", resuming" if key in still else ""))
+        pending, run = still, run + 1
+    return sorted(done)
+
+
+def recipe_extract(compiled: Compiled, directory: Path, origins: set[str] | None = None,
+                   log: Callable[[str], None] = print) -> list[str] | None:
+    """The assembly's own rsr recipe ("rsr" in the assembly), if it has one: its proposal written to
+    rsr/proposal.json, and extract_until_checked with its target, rounds and check samples. None if it has none."""
+    recipe = compiled.assembly.get("rsr")
+    if not recipe:
+        return None
+    proposal = recipe.get("proposal")
+    if proposal == "marginal":
+        search = marginal_proposal(compiled)
+    elif proposal is None:
+        search = None
+    else:
+        search = uniform_proposal(compiled, float(proposal))
+    if search is not None:
+        (directory / "rsr").mkdir(parents=True, exist_ok=True)
+        (directory / "rsr" / "proposal.json").write_text(json.dumps(search, indent=2) + "\n", encoding="utf-8")
+    return extract_until_checked(compiled, directory, origins, log=log, proposal=search,
+                                 unknown_target=float(recipe.get("unknown_target", RSR_UNKNOWN_TARGET)),
+                                 max_rounds=int(recipe.get("max_rounds", RSR_MAX_ROUNDS)),
+                                 check_samples=int(recipe.get("check_samples", 1_000_000)))
 
 
 def uniform_proposal(compiled: Compiled, p_open: float) -> dict[str, Any]:

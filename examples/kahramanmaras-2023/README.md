@@ -423,7 +423,10 @@ behind it.
   - While the unclassified share is 1e-5 or more, rsr resumes from the stored rules with a new seed,
     and the rules are checked again on new samples.
   - The cap is rsr's default of 10,000 rounds over all runs. Each system's `model.json` lists its
-    runs and their seeds.
+    runs and their seeds, and the result of each check.
+  - This recipe is the assembly's `"rsr"` setting, so the app's **Initialise** and
+    `python -m src rules kahramanmaras-2023/shakemap` both follow it (in
+    `bn_builder_series.extract_until_checked`).
   - Sampling decides reachability by the rules. The rows they leave undecided are learnt from: rsr
     resolves them into new rules until every row is decided, and the rules are kept for the session.
     The rules are also needed to condition on an observed reachability state.
