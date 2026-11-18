@@ -89,7 +89,7 @@ class Reachable(Probability):
     """
 
     def __init__(self, childs, parents, origin, edge_ids, network, destination=None, rules=None, directory=None,
-                 device="cpu"):
+                 rules_home=None, device="cpu"):
         """
         childs      : [Variable S], values ["Fail", "Survival"]
         parents     : [Variable EdgeOpen] of every random edge, values ["False", "True"]
@@ -98,6 +98,8 @@ class Reachable(Probability):
         network     : the Node and Edge tables, or the name of a JSON file holding them (relative to directory)
         destination : the source node support comes from; None for any node marked key_destination
         rules       : {"upper": survival rules file, "lower": failure rules file} relative to directory, or None
+        rules_home  : where this system's own rules are kept, {"folder" (relative to directory), "rules_sha256",
+                      "target_add_h", "origin", "edge_order"}: rules learnt from samples are stored there
         """
         import numpy as np
 
@@ -125,6 +127,7 @@ class Reachable(Probability):
         self._key = (self._n_nodes, tuple(self.edge_ids), len(fixed))
         self.rules_reference = rules
         self.rules_directory = None if directory is None else Path(directory)   # rules are relative to it
+        self.rules_home = rules_home
         self.rules = None if rules is None else self._load_rules(rules, Path(directory))
         self.tally = Tally(seen=0, unclassified=0)
         if not any(nx.has_path(graph, origin, t) for t in self.targets):
@@ -187,7 +190,7 @@ class TravelTimeToNearest(Probability):
     """
 
     def __init__(self, childs, parents, origin, edge_ids, target_add_h, network, rules=None,
-                 directory=None, device="cpu"):
+                 directory=None, rules_home=None, device="cpu"):
         """
         childs       : [Variable S], values ["Fail", "Survival"]
         parents      : [Variable EdgeOpen] of every edge, values ["False", "True"]
@@ -203,6 +206,9 @@ class TravelTimeToNearest(Probability):
                        each was extracted at ("upper_at", "lower_at"). An edge state matching a
                        survival rule is S = Survival, a failure rule S = Fail.
         directory    : the folder file names are relative to (tbnpy passes the spec's folder)
+        rules_home   : where this system's own rules are kept, at target_add_h: {"folder" (relative to
+                       directory), "rules_sha256", "target_add_h", "origin", "edge_order"}; rules learnt
+                       from samples are stored there
         """
         super().__init__(childs, parents, device)
         assert len(childs) == 1, "TravelTimeToNearest: one S child"
@@ -220,6 +226,7 @@ class TravelTimeToNearest(Probability):
         self.target_add_h = float(target_add_h)
         self.rules_reference = rules
         self.rules_directory = None if directory is None else Path(directory)   # rules are relative to it
+        self.rules_home = rules_home
         self.rules = None if rules is None else self._load_rules(rules, Path(directory))
         self.tally = Tally(seen=0, unclassified=0)
 

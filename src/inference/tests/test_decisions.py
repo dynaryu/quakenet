@@ -184,3 +184,37 @@ def test_rules_learnt_by_the_system_message_are_stored_with_the_system(toy_sessi
         assert torch.equal(stored, mat) and len(refs) == len(stored)
     meta = json.loads(((tmp_path / ref["upper"]).parent / "model.json").read_text(encoding="utf-8"))
     assert meta["learnt_from_samples"]["sfun_calls"] == n_learnt
+
+
+def test_rules_learnt_without_stored_ones_go_to_the_system_s_own_folder_where_the_builder_finds_them(
+        toy_session, tmp_path, monkeypatch):
+    """A system with no stored rules (a fresh clone) learns them from the rows and stores them in its own
+    rules folder (rules_home), created with what the builder checks; the next build finds them as its own."""
+    import json
+
+    import torch
+    from src.builder import bn_builder
+    from src.inference import cliques
+
+    t = toy_session.t
+    k, prob = next(iter(t["systems"].items()))
+    monkeypatch.setattr(prob, "rules", None)
+    monkeypatch.setattr(prob, "rules_reference", None)
+    monkeypatch.setattr(prob, "rules_directory", tmp_path)
+    monkeypatch.setenv("QUAKENET_SAVE_RULES", "1")
+
+    e = torch.stack([toy_session.rows[v.name] for v in prob.parents], dim=1).long()
+    states, n_learnt = cliques.system_down(t, k, e, {})
+    assert n_learnt > 0 and torch.equal(states, prob.evaluate(e.double())[:, 0].long())
+    folder = tmp_path / prob.rules_home["folder"]
+    for side, file in (("upper", "refs_up_1.pt"), ("lower", "refs_low_0.pt")):
+        stored = torch.load(folder / file, weights_only=True)
+        assert torch.equal(stored, prob.rules[0 if side == "upper" else 1])
+        assert len(json.loads((folder / file).with_suffix(".json").read_text(encoding="utf-8"))) == len(stored)
+    assert prob.rules_reference["upper"] == f"{prob.rules_home['folder']}/refs_up_1.pt"
+
+    data = bn_builder.tbn_data(engine.compile_query({"assembly": TOY}))
+    node = next(n for n in data["nodes"] if n["childs"] == [f"SystemState::{k}"])
+    assert bn_builder.stored_rules(tmp_path, node) == [(prob.target_add_h, folder)]
+    bn_builder.attach_rules(data, tmp_path)
+    assert node["kwargs"]["rules"]["upper"] == prob.rules_reference["upper"]

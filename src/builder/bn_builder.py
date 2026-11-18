@@ -675,9 +675,14 @@ def rules_source(ref: dict[str, Any] | None, threshold: float) -> str:
 
 def attach_rules(data: dict[str, Any], directory: Path) -> int:
     """Give each system-state node the stored rules that hold at its threshold, as its ``rules``
-    argument: file names relative to ``directory``. Returns how many origins have any."""
+    argument: file names relative to ``directory``, and its own rules folder, where rules learnt from samples
+    are stored, as ``rules_home``. Returns how many origins have any."""
     found = 0
     for node in system_nodes(data):
+        node["kwargs"]["rules_home"] = {
+            "folder": rules_folder(directory, node["kwargs"]["origin"], rules_threshold(node)).relative_to(directory).as_posix(),
+            "rules_sha256": rules_fingerprint(node), "target_add_h": rules_threshold(node),
+            "origin": node["kwargs"]["origin"], "edge_order": list(node["kwargs"]["edge_ids"])}
         ref = choose_rules(stored_rules(directory, node), rules_threshold(node))
         if ref:
             ref = {k: (v.relative_to(directory).as_posix() if isinstance(v, Path) else v) for k, v in ref.items()}
@@ -711,7 +716,8 @@ def build_tbn(compiled: Compiled, bindings: set[int] | None = None, device: str 
             candidate = model_dir(assembly_path(compiled.assembly["id"]))
         except RegistryError:
             candidate = None
-        if candidate is not None and attach_rules(data, candidate):
+        if candidate is not None:              # its rules, and where rules learnt from samples go
+            attach_rules(data, candidate)
             directory = candidate
     return compile_tbn(data, device=device, directory=directory)
 

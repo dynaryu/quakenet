@@ -454,10 +454,10 @@ def system_down(t, k, e, ev, opened=None):
     in a box of the failure rules fails. An observed S_k keeps its value.
 
     learn(): the rows no rule decides are learnt from first. rsr resolves them by the system function (ndtools)
-    into new reference states, keeping these rows as its samples, until every one is decided. The system keeps
-    the rules for later messages and, when they are its own (its rsr folder, at its own threshold), they are
-    written back there for the next round, unless QUAKENET_SAVE_RULES=0. Without stored rules, all rows are
-    learnt from.
+    into new reference states, starting from the system's rules (its own, borrowed from other thresholds, or
+    none) and keeping these rows as its samples, until every one is decided. The system keeps the rules for
+    later messages, and they are stored in its own rules folder (rules_home: rsr/<origin>/..., where the builder
+    finds them next time), created if new, unless QUAKENET_SAVE_RULES=0; that folder is its rules from then on.
 
     opened (column indices of e): S_k for each row with each of those edges opened as well, (N, len(opened)), the
     message under do(E_j = open), the rest of the row kept. A row whose edge j is already open keeps its state.
@@ -476,10 +476,8 @@ def system_down(t, k, e, ev, opened=None):
     from rsr._checkpoint import save_json, save_tensor
     from rsr.rsr import classify_samples_with_indices, run_ref_extraction_by_mcs
 
-    ref, folder = getattr(prob, "rules_reference", None), getattr(prob, "rules_directory", None)
-    own = bool(ref and folder is not None and ref.get("upper") and ref.get("lower")
-               and ref.get("upper_at") == ref.get("lower_at") == getattr(prob, "target_add_h", None))
-    files = {side: Path(folder) / ref[side] for side in ("upper", "lower")} if own else {}
+    home, directory = getattr(prob, "rules_home", None), getattr(prob, "rules_directory", None)
+    names = {"upper": "refs_up_1.pt", "lower": "refs_low_0.pt"}
     empty = torch.empty((0, len(prob.edge_ids), 2), dtype=torch.int32)
     n_ops = 0
 
@@ -495,13 +493,17 @@ def system_down(t, k, e, ev, opened=None):
         if not r["unknown"]:
             return
         check_cancelled()
-        save = own and os.environ.get("QUAKENET_SAVE_RULES", "1") != "0"
+        save = home is not None and directory is not None and os.environ.get("QUAKENET_SAVE_RULES", "1") != "0"
         start = {"refs_upper": [], "refs_lower": [], "refs_mat_upper": rules[0], "refs_mat_lower": rules[1]}
-        if save:                                    # the stored rules: the .json references with the .pt tensors
-            start = {f"refs_{side}": json.loads(f.with_suffix(".json").read_text(encoding="utf-8"))
-                     for side, f in files.items()}
-            start.update({f"refs_mat_{side}": torch.load(f, map_location="cpu", weights_only=True).to(torch.int32)
-                          for side, f in files.items()})
+        ref = prob.rules_reference or {}
+        if save:                       # the rules the system has on file: the .json references with the .pt tensors
+            for side in ("upper", "lower"):
+                if ref.get(side):
+                    f = Path(directory) / ref[side]
+                    start[f"refs_{side}"] = json.loads(f.with_suffix(".json").read_text(encoding="utf-8"))
+                    start[f"refs_mat_{side}"] = torch.load(f, map_location="cpu", weights_only=True).to(torch.int32)
+                else:
+                    start[f"refs_mat_{side}"] = empty
         f = prob.system_function()
         with tempfile.TemporaryDirectory() as scratch, contextlib.redirect_stdout(io.StringIO()):
             res = run_ref_extraction_by_mcs(
@@ -517,18 +519,28 @@ def system_down(t, k, e, ev, opened=None):
         calls = sum(m.get("n_sfun_upper", 0) + m.get("n_sfun_lower", 0) for m in res["metrics_log"])
         n_ops += calls
         if save:
-            for side, path in files.items():
-                save_json(refs[side], path.with_suffix(".json"))
-                save_tensor(mats[side], path)
-            meta_file = files["upper"].parent / "model.json"
-            if meta_file.is_file():
-                meta = json.loads(meta_file.read_text(encoding="utf-8"))
-                learnt = meta.get("learnt_from_samples") or {"rows": 0, "sfun_calls": 0}
-                meta["learnt_from_samples"] = {
-                    "how": "rows of a session's samples the rules left undecided, resolved by rsr (samples kept)",
-                    "rows": learnt["rows"] + int(r["unknown"]), "sfun_calls": learnt["sfun_calls"] + calls,
-                    "rules": {side: len(mats[side]) for side in ("upper", "lower")}}
-                save_json(meta, meta_file)
+            folder = Path(directory) / home["folder"]
+            folder.mkdir(parents=True, exist_ok=True)
+            for side, file in names.items():
+                save_json(refs[side], (folder / file).with_suffix(".json"))
+                save_tensor(mats[side], folder / file)
+            meta_file = folder / "model.json"
+            # a new folder gets what the builder checks the rules against (their system and threshold)
+            meta = (json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.is_file() else
+                    {"rules_sha256": home["rules_sha256"], "target_add_h": home["target_add_h"],
+                     "origin": home["origin"], "edge_order": home["edge_order"],
+                     "system_value": "binary state",
+                     "runs": [{"proposal": "none: rows of a session's samples, not a search", "rounds": 0,
+                               "started_from": "stored rules" if ref else "no rules", "metrics": None}]})
+            learnt = meta.get("learnt_from_samples") or {"rows": 0, "sfun_calls": 0}
+            meta["learnt_from_samples"] = {
+                "how": "rows of a session's samples the rules left undecided, resolved by rsr (samples kept)",
+                "started_from": learnt.get("started_from", "stored rules" if ref else "no rules"),
+                "rows": learnt["rows"] + int(r["unknown"]), "sfun_calls": learnt["sfun_calls"] + calls,
+                "rules": {side: len(mats[side]) for side in ("upper", "lower")}}
+            save_json(meta, meta_file)
+            prob.rules_reference = {side: (Path(home["folder"]) / file).as_posix() for side, file in names.items()}
+            prob.rules_reference.update(upper_at=home["target_add_h"], lower_at=home["target_add_h"])
 
     prob.tally["seen"] += len(e)
     learn(e)
