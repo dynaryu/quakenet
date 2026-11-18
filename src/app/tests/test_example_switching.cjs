@@ -58,7 +58,7 @@ function session(id, completed = true, tracked = true) {
 }
 
 function harness(sessions = {[toy]: session(toy), [ema]: session(ema)}, storage = new Map()) {
-  const ids = ["e-talk", "e-words", "e-confirm", "agent-status", "samples", "run", "stop", "new-session", "node-pop", "msg-pop", "road",
+  const ids = ["e-talk", "e-words", "e-confirm", "agent-status", "samples", "run", "stop", "new-session", "init-rules", "node-pop", "msg-pop", "road",
     "decision-tasks", "task-summary", "task-status", "observation-form", "observation-chat", "observation-kind", "observation-variable",
     "observation-value", "observation-value-label", "observation-reading", "observation-reading-label", "observation-source",
     "observation-error", "observation-status"];
@@ -97,6 +97,7 @@ function harness(sessions = {[toy]: session(toy), [ema]: session(ema)}, storage 
     post: async (url, body) => { calls.push({url, body: clone(body)}); throw Error("Unexpected calculation request"); },
     renderRoadmap: () => { nodes["#road"].textContent = ctx.state.session?.result.marker || ""; },
     renderQuakeLine() {}, checkShakemapVersion() {}, isShakemap: () => false,
+    rulesPoll: null, clearTimeout() {}, checkRules() {},   // Initialise: no rules to ask the server about here
   };
   for (const name of ["Controls", "Map", "Results", "BN", "Cliques", "Schema", "Assumptions"])
     ctx[`render${name}`] = () => { painted[name] = ctx.state.ex.assembly.id; };

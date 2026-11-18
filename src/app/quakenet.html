@@ -313,6 +313,7 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 12px; margin-
   <button class="primary" id="run">Run</button>
   <span class="sub" id="status"></span>
   <button id="new-session" title="Clear the session, as when the page first opens: nothing is computed until you choose a decision task and press Run. The current session is kept in records/sessions/archive/">New session</button>
+  <button id="init-rules" hidden>Initialise</button>
   <button id="quakes-btn" aria-expanded="false" aria-controls="quakes" title="Recent earthquakes with a USGS ShakeMap near the networks, and past ones near this network">Earthquakes<span class="badge" id="quakes-badge"></span></button>
   <button id="theme" title="Toggle light and dark">Theme</button>
   <button id="stop" disabled title="Stop running Bayesian-network computations and keep the last completed results">Stop</button>
@@ -480,6 +481,8 @@ async function load(id) {
   state.ex = state.session = state.result = null;
   state.preset = {};
   state.pick = null;
+  clearTimeout(rulesPoll);
+  $("#init-rules").hidden = true;
   renderQuakeLine();
   try {
     const example = await getJSON(`/api/example?assembly=${encodeURIComponent(id)}`);
@@ -496,6 +499,7 @@ async function load(id) {
     $("#node-pop").hidden = $("#msg-pop").hidden = true;
     setStatus("");
     agentStatus();
+    checkRules(id, epoch);
   } catch (err) {
     if (epoch === state.epoch) { state.ex = null; setStatus(err.message, true); }
   } finally {
@@ -596,6 +600,61 @@ function eventRow() {
     if (el.dataset.row === ev.id && el.value !== "") ev[el.dataset.attr] = Number(el.value);
   return ev.id ? ev : null;
 }
+
+// ---- Initialise: the rsr rules a new machine has not stored yet ------------------------------------------
+// The rules are generated locally (not kept in the repository). Initialise extracts, in a background process, the
+// rules of every system of the example without its own; runs started afterwards use them. Until then the
+// probabilities are the same, only slower: what the rules leave undecided is evaluated directly.
+let rulesPoll = null;
+
+function renderRulesButton(id, s) {
+  const b = $("#init-rules");
+  if (id !== state.ex?.assembly?.id) return;
+  b.hidden = !s.running && !s.missing.length;
+  b.disabled = s.running;
+  b.textContent = s.running ? `Initialising ${s.stored}/${s.systems}…` : "Initialise";
+  b.title = s.running
+    ? `Extracting rsr rules in the background: ${s.stored} of ${s.systems} systems stored so far.` +
+      (s.last_line ? `\nLatest: ${s.last_line}` : "") + (s.log ? `\nLog: ${s.log}` : "")
+    : `Extract and store the rsr rules of the ${s.missing.length} of ${s.systems} system(s) that have none on this ` +
+      `machine. It runs in the background and can take a while; runs started afterwards use the rules.` +
+      (s.failed ? `\nThe last attempt stopped with an error; see ${s.log}.` : "");
+}
+
+async function checkRules(id, epoch) {
+  clearTimeout(rulesPoll);
+  let s;
+  try { s = await getJSON(`/api/rules?assembly=${encodeURIComponent(id)}`); } catch { return; }
+  if (epoch !== state.epoch) return;
+  const was = state.ex.rulesRunning;
+  state.ex.rulesRunning = s.running;
+  state.ex.rules = { ...state.ex.rules, stored: s.stored };
+  renderRulesButton(id, s);
+  if (s.running) rulesPoll = setTimeout(() => checkRules(id, epoch), 5000);
+  else if (was && s.failed) setStatus(`Initialise stopped with an error; see ${s.log}.`, true);
+  else if (was) setStatus(s.missing.length ? `Initialise finished; ${s.missing.length} system(s) still without rules.`
+                                           : "Initialised: rsr rules stored for every system. The next Run uses them.");
+}
+
+$("#init-rules").addEventListener("click", async () => {
+  const id = state.ex?.assembly?.id, epoch = state.epoch;
+  if (!id) return;
+  $("#init-rules").disabled = true;
+  try {
+    const r = await fetch("/api/rules/initialise", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                    body: JSON.stringify({ assembly: id }) });
+    const s = await r.json();
+    if (!r.ok) throw new Error(s.error || r.statusText);
+    if (epoch !== state.epoch) return;
+    state.ex.rulesRunning = s.running;
+    renderRulesButton(id, s);
+    setStatus(s.running ? `Extracting rsr rules for ${s.missing.length} system(s) in the background (log: ${s.log}).` : "");
+    if (s.running) rulesPoll = setTimeout(() => checkRules(id, epoch), 5000);
+  } catch (err) {
+    $("#init-rules").disabled = false;
+    setStatus(err.message, true);
+  }
+});
 
 // ---- run ----------------------------------------------------------------------------------
 

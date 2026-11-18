@@ -39,6 +39,19 @@ The app opens at **http://127.0.0.1:8765**. Keep the terminal open while using i
 Run a baseline, select the decision task, then add observations and run another
 analysis. Use dropdown observations to try the app without configuring an LLM.
 
+**First use on a new machine: Initialise.** The rsr rules that decide each system's
+state are learnt locally and stored under `examples/<network>/tbnpy/<assembly>/rsr/`;
+they are not in the repository. While an example has systems without stored rules,
+an **Initialise** button appears in the header. Press it to learn and store them in
+the background. It shows progress (`Initialising 12/72…`, with the latest log line
+on hover) and disappears once every system has rules. Each example needs it once.
+It can take from seconds (toy-ca) to a long while (EMA, Kahramanmaraş), and the log
+is written to `.cache/rules-<assembly>-own.log`. Until it finishes, the app still
+works and gives the same probabilities, only more slowly: what the rules leave
+undecided is evaluated directly. Runs started after it finishes use the new rules.
+The same can be done from a terminal with `python -m src rules <assembly>`, e.g.
+`python -m src rules ema-highway/gmm`.
+
 To start it again later, open a terminal in the `quakenet` folder and run:
 
 ```sh

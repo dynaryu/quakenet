@@ -8,6 +8,10 @@ Standard library only. Endpoints:
     GET  /api/example?assembly=<id>
                                   one example: its network's rows, its query menu, its stored rules
     GET  /api/views               the schema and every compiled BN, each with its query menu
+    GET  /api/rules?assembly=<id> which systems have rsr rules of their own stored, and whether Initialise runs
+    POST /api/rules/initialise   {assembly}
+                                  Initialise: extract, in the background, the rsr rules of every system that
+                                  has none of its own (a new machine stores none: they are not in the repository)
     POST /api/query               a probabilistic query -> its answer          (src/inference)
     GET  /api/chat-status         whether a language-model backend is ready
     GET  /api/shakemap-events?network=<id>&min_magnitude=4
@@ -468,24 +472,64 @@ _extractions: dict[tuple[str, float], subprocess.Popen] = {}
 _extractions_lock = threading.Lock()
 
 
-def extract_in_background(assembly: str, threshold: float, origins: list[str]) -> str:
-    """Start ``python -m src rules`` for origins without rules of their own at this threshold; say so."""
+_extraction_logs: dict[tuple[str, float | None], Path] = {}
+
+
+def extract_in_background(assembly: str, threshold: float | None, origins: list[str]) -> str:
+    """Start ``python -m src rules`` for origins without rules of their own at this threshold; say so. A threshold
+    of None extracts each system at the network's own threshold (or for connectivity, which has none): the page's
+    Initialise."""
     key = (assembly, threshold)
+    at = f" for target_add_h={threshold:g}" if threshold is not None else ""
     with _extractions_lock:
         job = _extractions.get(key)
         if job is not None and job.poll() is None:
-            return (f"rsr rules for target_add_h={threshold:g} are still being extracted in the background; "
-                    "later runs will use them.")
-        log = ROOT / ".cache" / f"rules-{assembly.replace('/', '_')}-{threshold:g}.log"
+            return f"rsr rules{at} are still being extracted in the background; later runs will use them."
+        log = ROOT / ".cache" / f"rules-{assembly.replace('/', '_')}-{'own' if threshold is None else f'{threshold:g}'}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
+        command = [sys.executable, "-m", "src", "rules", assembly]
+        if threshold is not None:
+            command += ["--target-add-h", repr(threshold)]
         with log.open("w", encoding="utf-8") as out:
             _extractions[key] = subprocess.Popen(
-                [sys.executable, "-m", "src", "rules", assembly, "--target-add-h", repr(threshold), "--origins", *origins],
-                cwd=ROOT, stdout=out, stderr=subprocess.STDOUT,
+                command + ["--origins", *origins], cwd=ROOT, stdout=out, stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-    print(f"[quakenet] extracting rsr rules for {assembly} at target_add_h={threshold:g}: {', '.join(origins)}", flush=True)
-    return (f"Extracting rsr rules for target_add_h={threshold:g} in the background, for {len(origins)} origin(s); "
+        _extraction_logs[key] = log
+    print(f"[quakenet] extracting rsr rules for {assembly}{at}: {', '.join(origins)}", flush=True)
+    return (f"Extracting rsr rules{at} in the background, for {len(origins)} system(s); "
             f"later runs will use them (log: .cache/{log.name}).")
+
+
+def rules_status(assembly_id: str) -> dict[str, Any]:
+    """Which of the example's systems have rsr rules of their own stored (at the network's thresholds), and whether
+    the page's Initialise is extracting the rest: for a new machine, where no rules are stored yet."""
+    from src.builder.builders import rules_status as status_of
+
+    path = assembly_path(assembly_id)
+    systems = status_of(tbn_data(compile_path(path, engine.library())), model_dir(path))
+    key = (assembly_id, None)
+    with _extractions_lock:
+        job, log = _extractions.get(key), _extraction_logs.get(key)
+    code = None if job is None else job.poll()
+    last = ""
+    if log is not None and log.is_file():
+        lines = [line.strip() for line in log.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+        last = lines[-1] if lines else ""
+    return {"systems": len(systems), "stored": sum(s["exact"] for s in systems),
+            "missing": [s["origin"] for s in systems if not s["exact"]],
+            "running": job is not None and code is None,
+            "failed": isinstance(code, int) and code != 0,
+            "log": f".cache/{log.name}" if log is not None else None, "last_line": last[-300:]}
+
+
+def initialise_rules(assembly_id: str) -> dict[str, Any]:
+    """Start extracting rsr rules, in the background, for every system of the example without its own: what a new
+    machine needs, since the rules are generated locally and not kept in the repository."""
+    status = rules_status(assembly_id)
+    if status["missing"] and not status["running"]:
+        extract_in_background(assembly_id, None, status["missing"])
+        status = rules_status(assembly_id)
+    return status
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -527,6 +571,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "; ".join(problems)}, HTTPStatus.NOT_FOUND)
         if url.path == "/api/views":
             return self._json(views())
+        if url.path == "/api/rules":
+            try:
+                return self._json(rules_status((parse_qs(url.query).get("assembly") or [""])[0]))
+            except RegistryError as exc:
+                return self._json({"error": "; ".join(exc.problems)}, HTTPStatus.NOT_FOUND)
         if url.path == "/api/forms":
             try:
                 return self._json({"forms": forms((parse_qs(url.query).get("assembly") or [""])[0])})
@@ -620,6 +669,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._session(path)
         if path == "/api/session/new":
             return self._new_session()
+        if path == "/api/rules/initialise":
+            try:
+                return self._json(initialise_rules(self._read_request().get("assembly", "")))
+            except (RegistryError, json.JSONDecodeError) as exc:
+                problems = exc.problems if isinstance(exc, RegistryError) else [str(exc)]
+                return self._json({"error": "; ".join(problems)}, HTTPStatus.BAD_REQUEST)
         if path == "/api/session/draft":
             return self._draft()
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)

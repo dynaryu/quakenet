@@ -3,7 +3,7 @@
     check     validate schema/ and instances/, compile every assembly        (1, 2, 3)
     compile   show the BN one assembly expands to, or write its nodes         (3)
     build     generate tbnpy models and RSR rules beneath each example        (3)
-    rules     extract RSR rules for another target_add_h, stored beside them  (3)
+    rules     extract RSR rules (the app's Initialise), or for another target_add_h (3)
     replay    re-run a recorded query and check it reproduces exactly         (4)
     scope     which part of the BN a query depends on, and what it samples    (4)
     query     answer a probabilistic query                                    (4)
@@ -83,16 +83,18 @@ def cmd_rules(args: argparse.Namespace) -> int:
     path, lib = assembly_path(args.assembly), load_library()
     assembly = load_assembly(path)
     network = load_network(assembly["network"], lib)
+    thresholds = set()
     for event in network.rows("SystemEvent"):
         if args.target_add_h is not None:
             event["target_add_h"] = args.target_add_h
-        threshold = event["target_add_h"]
+        thresholds.add(event["target_add_h"])
     _, problems = check_tables(network.tables, lib, "--target-add-h")
     if problems:
         raise RegistryError(problems)
     out = model_dir(path)
     done = extract_system_rules(compile_assembly(assembly, lib, network), out, set(args.origins) if args.origins else None)
-    print(f"stored rsr rules for {len(done)} origin(s) at target_add_h={threshold:g} under {rel(out)}/rsr/")
+    at = f" at target_add_h={', '.join(f'{t:g}' for t in sorted(thresholds))}" if thresholds else ""
+    print(f"stored rsr rules for {len(done)} system(s){at} under {rel(out)}/rsr/")
     return 0
 
 

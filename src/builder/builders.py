@@ -52,6 +52,22 @@ def attach_rules(data: dict[str, Any], directory: Path) -> int:
     return _of_spec(data).attach_rules(data, directory)
 
 
+def rules_status(data: dict[str, Any], directory: Path) -> list[dict[str, Any]]:
+    """Per system with rsr rules: its key (the origin, or the Support row of a reachability system), its threshold
+    (None for connectivity), and whether it has rules of its own stored at that threshold (``exact``). Attaches the
+    stored rules to ``data`` as attach_rules does."""
+    builder = _of_spec(data)
+    attach_rules(data, directory)
+    nodes = builder.ruled_nodes(data) if builder is bn_builder_series else builder.system_nodes(data)
+    key = bn_builder_series.rules_key if builder is bn_builder_series else (lambda node: node["kwargs"]["origin"])
+    out = []
+    for node in nodes:
+        threshold = builder.rules_threshold(node)
+        out.append({"origin": key(node), "target_add_h": threshold,
+                    "exact": builder.rules_source(node["kwargs"].get("rules"), threshold) == "exact"})
+    return out
+
+
 def extract_system_rules(compiled: Compiled, directory: Path, origins: set[str] | None = None, **kwargs) -> list[str]:
     """rsr's rules for each system; the options beyond bn_builder.extract_system_rules' (a proposal, resuming)
     are bn_builder_series.py's."""

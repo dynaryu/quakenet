@@ -223,6 +223,39 @@ def test_a_run_left_mostly_unclassified_starts_extraction_in_the_background(base
     assert len(started) == 1 and any("still being extracted" in w for w in body["warnings"])
 
 
+def test_initialise_extracts_the_rules_a_new_machine_lacks(base_url, monkeypatch, tmp_path):
+    """A fresh clone stores no rsr rules: Initialise starts one background extraction for every system, at the
+    network's own thresholds, and says it is running until it ends."""
+    from src.app import server
+    from src.builder import bn_builder
+    import subprocess
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bn_builder, "model_dir", lambda assembly_file: tmp_path / "empty-model")
+    monkeypatch.setattr(server, "model_dir", lambda assembly_file: tmp_path / "empty-model")
+    started, running = [], [True]
+    job = type("Job", (), {"poll": lambda self: None if running[0] else 0})
+    monkeypatch.setattr(server, "subprocess", SimpleNamespace(
+        Popen=lambda cmd, **kw: started.append(cmd) or job(), STDOUT=subprocess.STDOUT, CREATE_NEW_PROCESS_GROUP=0))
+    monkeypatch.setattr(server, "_extractions", {})
+    monkeypatch.setattr(server, "_extraction_logs", {})
+
+    status, body = get(base_url + "/api/rules?assembly=toy-ca/demo")
+    status_of = json.loads(body)
+    assert status == 200 and status_of["systems"] == 6 and status_of["stored"] == 0 and not status_of["running"]
+    status, body = post(base_url + "/api/rules/initialise", {"assembly": "toy-ca/demo"})
+    assert status == 200 and body["running"] and len(body["missing"]) == 6
+    assert started[0][2:5] == ["src", "rules", "toy-ca/demo"] and "--target-add-h" not in started[0]
+    assert sorted(started[0][started[0].index("--origins") + 1:]) == sorted(status_of["missing"])
+    status, body = post(base_url + "/api/rules/initialise", {"assembly": "toy-ca/demo"})   # pressed again: one job
+    assert len(started) == 1 and body["running"]
+    running[0] = False
+    status, body = get(base_url + "/api/rules?assembly=toy-ca/demo")
+    assert not json.loads(body)["running"] and not json.loads(body)["failed"]
+    status, body = post(base_url + "/api/rules/initialise", {"assembly": "nowhere/x"})
+    assert status == 400
+
+
 def test_a_negative_threshold_is_refused(base_url):
     status, body = post(base_url + "/api/query", {"assembly": "toy-ca/demo", "targets": ["SystemState::n4"],
                                                   "rows": {"reach-key-destination": {"target_add_h": -0.1}}})
