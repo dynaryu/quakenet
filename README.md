@@ -47,18 +47,11 @@ the background. It shows progress (`Initialising 12/72…`, with the latest log 
 on hover) and disappears once every system has rules. Each example needs it once.
 It can take from seconds (toy-ca) to a long while (EMA, Kahramanmaraş), and the log
 is written to `.cache/rules-<assembly>-own.log`. Until it finishes, the app still
-works and gives the same probabilities, only more slowly: what the rules leave
-undecided is evaluated directly. Runs started after it finishes use the new rules.
+works and gives the same probabilities, only more slowly: runs learn the rules they
+need as they go, including for an observed system state, and store them.
+Runs started after it finishes use the new rules.
 The same can be done from a terminal with `python -m src rules <assembly>`, e.g.
 `python -m src rules ema-highway/gmm`.
-
-An example can set its own extraction recipe in its assembly (`"rsr"`). Kahramanmaraş
-does: the search draws every edge open with probability 0.95, and each system's rules
-are checked on 10⁶ fresh samples and extraction resumed until they leave less than
-10⁻⁵ undecided. This makes Initialise slower but runs faster. With the default
-recipe, 6–40% of sampled edge states were left for direct evaluation; with this one,
-under 0.5%. Initialise and `rules` both follow the recipe. An interrupted extraction
-resumes from what was stored when started again.
 
 To start it again later, open a terminal in the `quakenet` folder and run:
 

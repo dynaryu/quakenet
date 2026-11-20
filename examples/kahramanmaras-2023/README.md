@@ -116,7 +116,7 @@ from one chosen source, or from any source (the `T..-any` nodes).
 
 Observations can be made of bridge damage, edges, ground-failure occurrence (observed as PGD > 0 or
 PGD = 0) and ground-failure roads.
-A reachability state can be observed once its rsr rules are stored (see below).
+A reachability state can be observed too, with or without stored rsr rules (see below).
 
 The BN tab draws one plane per binding, so the four system layers are four planes, and every road
 (the `C` edges included) is drawn faintly on each plane for orientation.
@@ -415,21 +415,18 @@ behind it.
   - The correlation between IMs at one site is ignored.
 - **System layers:** "reachable" means connected over open edges, whatever the detour. One layer per
   source, and one for any source (reachable from at least one).
-- **rsr rules** (`rsr/<Support id>/reachable/`): the search draws every random edge open with
-  probability 0.95, independently (`rsr/proposal.json`). The proposal only steers the search and
-  draws both states of every edge; the rules are exact whatever it is.
-  - rsr stops on its own quick estimate of the unclassified probability, which can fall below the
-    target early. So each system's rules are then checked on 1e6 fresh samples from the proposal.
-  - While the unclassified share is 1e-5 or more, rsr resumes from the stored rules with a new seed,
-    and the rules are checked again on new samples.
-  - The cap is rsr's default of 10,000 rounds over all runs. Each system's `model.json` lists its
-    runs and their seeds, and the result of each check.
-  - This recipe is the assembly's `"rsr"` setting, so the app's **Initialise** and
-    `python -m src rules kahramanmaras-2023/shakemap` both follow it (in
-    `bn_builder_series.extract_until_checked`).
-  - Sampling decides reachability by the rules. The rows they leave undecided are learnt from: rsr
-    resolves them into new rules until every row is decided, and the rules are kept for the session.
-    The rules are also needed to condition on an observed reachability state.
+- **rsr rules** (`rsr/<Support id>/reachable/`): learnt by the app's **Initialise** or
+  `python -m src rules kahramanmaras-2023/shakemap`, with rsr's default search. They need not be
+  complete: a run learns from what they leave undecided and stores what it learns.
+  - Sampling decides reachability by the rules. The rows they leave undecided are resolved by rsr
+    into new rules until every row is decided.
+  - Conditioning on an observed reachability state confines the sampler to that state's rules, so
+    the run first learns them from its own draws (as many as it keeps), before sampling. With
+    stored rules this adds a few seconds; with none, the rules are learnt then.
+  - More complete rules up front: the assembly can set `"rsr"`, e.g. `{"proposal": 0.95,
+    "unknown_target": 1e-5, "check_samples": 1000000}`. The search then draws every edge open with
+    probability 0.95, and each system's rules are checked on 1e6 fresh samples and extraction
+    resumed until they leave less than 1e-5 undecided (`bn_builder_series.extract_until_checked`).
 
 ### Not modelled yet
 - **Other causes of delay:** rubble in towns, congestion and the scale of the disaster, which reports

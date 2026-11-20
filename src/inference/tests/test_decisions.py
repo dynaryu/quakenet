@@ -151,6 +151,28 @@ def test_inspect_with_a_system_observed_opens_the_edge_in_the_rows_the_evidence_
     assert any(v > 0 for v, _ in got.values())
 
 
+def test_an_observed_system_learns_its_rules_in_the_run_before_the_chains_rely_on_them(toy_session, monkeypatch):
+    """The chains move only inside an observed system's boxes, so sample() first learns its rules from the run's
+    own draws: a system with no rules at all can be observed, and every row it gives is in the observed state."""
+    import torch
+    from rsr.rsr import classify_samples_with_indices
+    from src.inference import cliques
+
+    t = toy_session.t
+    k, prob = next(iter(t["systems"].items()))
+    monkeypatch.setattr(prob, "rules", None)
+    monkeypatch.setenv("QUAKENET_SAVE_RULES", "0")
+    rows, cost = cliques.sample(t, {f"SystemState::{k}": 0}, n_chain=20, n_burn=5, n_keep=50, n_learn=2000)
+    assert prob.rules is not None and cost["system_up"]["n_ops"] > 2000      # draws, and system function calls
+    e = torch.stack([rows[v.name] for v in prob.parents], dim=1).long()
+    assert (prob.evaluate(e.double())[:, 0] == 0).all()
+    fresh = cliques.root_draws(torch.full((2000, len(prob.parents), 2), 0.5, dtype=torch.float64))
+    # the learnt rules are the system's: wherever they decide a row, they agree with its function
+    r = classify_samples_with_indices(torch.nn.functional.one_hot(fresh, 2).int(), *prob.rules, return_masks=True)
+    decided = ~r["mask_unknown"]
+    assert torch.equal(r["mask_upper"][decided].long(), prob.evaluate(fresh[decided].double())[:, 0].long())
+
+
 def test_rules_learnt_by_the_system_message_are_stored_with_the_system(toy_session, tmp_path, monkeypatch):
     """A system's own rules, extended from the rows they leave undecided, are written back to its rsr folder:
     the .json references and the .pt tensors alike, with what was learnt recorded in its model.json."""

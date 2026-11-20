@@ -4,12 +4,6 @@
   "label": "Kahramanmaraş: bridges and ground failure under a USGS ShakeMap, support from each source",
   "network": "kahramanmaras-2023",
   "description": "The scenario ShakeMap (the M7.8 Pazarcık main shock by default; choose another on the page) gives SA(1.0) at the bridges and PGV and PGA at the liquefaction and landslide components. Bridges fail by Hazus fragility. Each ground-failure mechanism is its own chain: whether it occurs, then the permanent ground displacement (PGD), then whether the road stays open by the Hazus roadway curve. An edge is open only if its bridge and its ground-failure components all are; edges with nothing that can fail are in the graph but not variables. Each town has one system state per source, and one for any source: whether it is still connected to it. Sampling fetches the map (about 30 MB) unless it is cached.",
-  "rsr": {
-    "proposal": 0.95,
-    "unknown_target": 1e-05,
-    "check_samples": 1000000,
-    "max_rounds": 10000
-  },
   "bindings": [
     {
       "function": "hazard.shakemap",

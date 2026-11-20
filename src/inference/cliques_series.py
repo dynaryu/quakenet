@@ -1033,14 +1033,15 @@ def _cut(certs, support):
           "= 1   if S is not in the evidence"], "rsr_rules")
 def system_up(t, k, ev):
     """Message to clique (E): None (the constant 1) if S_k is not observed, else the certificates of
-    its observed state, the stored rsr rules: the failure reference states for Fail, the survival
-    ones for Survival. Their boxes cover the event only if the rules are complete at the system's
-    threshold. n_ops = 0."""
+    its observed state, the system's rsr rules: the failure reference states for Fail, the survival
+    ones for Survival. Their boxes cover the event only as far as the rules are complete, so sample()
+    first learns them further from the run's own draws (cliques.learn_observed). n_ops = 0."""
     s = ev.get(f"SystemState::{k}")
     if s is None:
         return None, 0
     if t["systems"][k].rules is None:
-        raise ValueError(f"SystemState::{k} cannot be observed: its system has no stored rsr rules")
+        raise ValueError(f"SystemState::{k} cannot be observed: its system has no rsr rules, stored or learnt "
+                         f"from the run's draws (the evidence ruled them all out)")
     upper, lower = t["systems"][k].rules
     return (lower if s == 0 else upper), 0
 
@@ -1118,11 +1119,13 @@ def _feasible(t, ms, fld, sa, generator, tries=1000):
                      f"allows it on every edge")
 
 
-def sample(t, ev, n_chain=100, n_burn=200, n_keep=10_000, bridge=8, seed=0, sa0=None, do=None, e0=None):
+def sample(t, ev, n_chain=100, n_burn=200, n_keep=10_000, bridge=8, seed=0, sa0=None, do=None, e0=None,
+           n_learn=None):
     """Rows from P(everything | ev) under do (intervene()), N = n_keep * n_chain of them.
 
     Nothing observed: every up message is 1, so one pass down the tree is exact: N independent rows
-    (_forward), no chains. Otherwise n_burn + n_keep sweeps of n_chain chains, each sweep sa_e_up,
+    (_forward), no chains. Otherwise, with a system observed, its rules are first learnt further from
+    n_learn (default N) edge vectors (cliques.learn_observed); then n_burn + n_keep sweeps of n_chain chains, each sweep sa_e_up,
     root_absorb and sa_e_down (see the module's docstring), each kept sweep then passed on down; row r
     from chain r % n_chain. The chains start from the field drawn from field(), or from sa0 (n_chain, n)
     in t["field_sites"] order if given; and E from e0 (n_chain, n_edges) where it lies in a box of every
@@ -1178,8 +1181,12 @@ def sample(t, ev, n_chain=100, n_burn=200, n_keep=10_000, bridge=8, seed=0, sa0=
                 ms = _Batch(t, ev)                 # the same messages, every edge at once
             except NotImplementedError:
                 pass
-        certs = [timed("system_up", system_up, t, k, ev) for k in t["systems"]]
         fld = field(t)
+        g_learn = torch.Generator().manual_seed(seed + 1)          # its own stream: the chains' stays as it was
+        timed("system_up", cliques.learn_observed, t, ev,
+              lambda m: cliques.root_draws(sa_e_up(t, ms, field_draw(fld, m, g_learn))[0], g_learn),
+              n_chain * n_keep if n_learn is None else n_learn)
+        certs = [timed("system_up", system_up, t, k, ev) for k in t["systems"]]
         sa = field_draw(fld, n_chain, g) if sa0 is None else sa0.clone()
         if series:
             sa = timed("sa_e_up", _feasible, t, ms, fld, sa, g)

@@ -435,14 +435,45 @@ def _cut(certs, support):
           "= 1   if S is not in the evidence"], "rsr_rules")
 def system_up(t, k, ev):
     """Message to clique (E): None (the constant 1) if S_k is not observed, else the certificates of
-    its observed state, the stored rsr rules: the failure reference states for Fail, the survival
-    ones for Survival. Their boxes cover the event only if the rules are complete at the system's
-    threshold. n_ops = 0."""
+    its observed state, the system's rsr rules: the failure reference states for Fail, the survival
+    ones for Survival. Their boxes cover the event only as far as the rules are complete, so sample()
+    first learns them further from the run's own draws (learn_observed). n_ops = 0."""
     s = ev.get(f"SystemState::{k}")
     if s is None:
         return None, 0
     upper, lower = t["systems"][k].rules
     return (lower if s == 0 else upper), 0
+
+
+def learn_observed(t, ev, draw, n, batch=5_000):
+    """Before the chains: each observed system's rules learnt further from n edge vectors draw(m) gives, m at a
+    time (E drawn from the root's message at fields drawn from the prior, so under the evidence on the edges).
+    The chains move only inside the observed systems' boxes, so a state no rule covers would never be
+    visited; learning from these rows (system_down's learn(), stored like it) covers what they reach. Rules
+    already complete learn nothing and cost only the draws. n_ops = draws + system function calls."""
+    observed = [k for k in t["systems"] if f"SystemState::{k}" in ev]
+    n_ops = 0
+    if not observed:
+        return None, 0
+    for begin in range(0, n, batch):
+        check_cancelled()
+        e = draw(min(batch, n - begin))
+        n_ops += len(e)
+        if not len(e):
+            continue
+        unique = torch.unique(e, dim=0)
+        for k in observed:
+            n_ops += system_down(t, k, unique, {})[1]
+    return None, n_ops
+
+
+def root_draws(q, generator=None):
+    """E rows drawn from the root's message q (m, n, 2), each row from its own; rows where the evidence
+    rules out both states of some edge are dropped."""
+    tot = q.sum(dim=-1)
+    q = q[(tot > 0).all(dim=1)]
+    p = q / q.sum(dim=-1, keepdim=True)
+    return torch.multinomial(p.reshape(-1, 2), 1, generator=generator).view(len(q), -1)
 
 
 @message("e", "e_s", "m_down^E(E) = P(E | evidence)",
@@ -612,11 +643,13 @@ def _forward(t, n, generator):
     return (sa, e, d), n
 
 
-def sample(t, ev, n_chain=100, n_burn=200, n_keep=10_000, bridge=8, seed=0, sa0=None, do=None, e0=None):
+def sample(t, ev, n_chain=100, n_burn=200, n_keep=10_000, bridge=8, seed=0, sa0=None, do=None, e0=None,
+           n_learn=None):
     """Rows from P(everything | ev) under do (intervene()), N = n_keep * n_chain of them.
 
     Nothing observed: every up message is 1, so one pass down the tree is exact: N independent rows
-    (_forward), no chains. Otherwise n_burn + n_keep sweeps of n_chain chains, each sweep sa_e_up,
+    (_forward), no chains. Otherwise, with a system observed, its rules are first learnt further from
+    n_learn (default N) edge vectors (learn_observed); then n_burn + n_keep sweeps of n_chain chains, each sweep sa_e_up,
     root_absorb and sa_e_down (see the module's docstring), each kept sweep then passed on down; row r
     from chain r % n_chain. The chains start from SA drawn from field(), or from sa0 (n_chain, n) in edge
     order if given; and E from e0 (n_chain, n) where it lies in a box of every observed system's
@@ -644,8 +677,12 @@ def sample(t, ev, n_chain=100, n_burn=200, n_keep=10_000, bridge=8, seed=0, sa0=
         # the leaves' messages, built once
         ls = [timed("obs_up", obs_up, t, i, ev) for i in range(len(t["edges"]))]
         ms = [timed("edge_up", edge_up, t, i, ev, l) for i, l in enumerate(ls)]
-        certs = [timed("system_up", system_up, t, k, ev) for k in t["systems"]]
         fld = field(t)
+        g_learn = torch.Generator().manual_seed(seed + 1)          # its own stream: the chains' stays as it was
+        timed("system_up", learn_observed, t, ev,
+              lambda m: root_draws(sa_e_up(t, ms, field_draw(fld, m, g_learn))[0], g_learn),
+              n_chain * n_keep if n_learn is None else n_learn)
+        certs = [timed("system_up", system_up, t, k, ev) for k in t["systems"]]
         sa = field_draw(fld, n_chain, g) if sa0 is None else sa0.clone()
         q = timed("sa_e_up", sa_e_up, t, ms, sa)
         support = torch.stack([(_lam(ev, c["D"], len(c["to_e"]))[:, None] * c["to_e"] * _lam(ev, c["E"], 2)).sum(0) > 0

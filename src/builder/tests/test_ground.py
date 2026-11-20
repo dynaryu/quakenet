@@ -84,7 +84,7 @@ def test_displacement_takes_k_delta_per_stretch():
 
 
 def test_rules_follow_the_assemblys_recipe_checked_and_resumed(tmp_path, monkeypatch):
-    """Kahramanmaraş's rules are extracted by its own recipe (its assembly's "rsr"): the 0.95 proposal, and each
+    """An assembly's own recipe ("rsr", which Kahramanmaraş can set) is followed: the 0.95 proposal, and each
     system's rules checked on fresh samples and resumed with the next seed while above the target, up to the cap."""
     import json
 
@@ -95,8 +95,8 @@ def test_rules_follow_the_assemblys_recipe_checked_and_resumed(tmp_path, monkeyp
         compiled = engine.compile_query({"assembly": KM})
     except Exception as exc:
         pytest.skip(f"the {KM} BN cannot be compiled here: {exc}")
-    assert compiled.assembly["rsr"] == {"proposal": 0.95, "unknown_target": 1e-5, "check_samples": 1_000_000,
-                                        "max_rounds": 10000}
+    monkeypatch.setitem(compiled.assembly, "rsr", {"proposal": 0.95, "unknown_target": 1e-5,
+                                                   "check_samples": 1_000_000, "max_rounds": 10000})
     calls, shares = [], {"T01-S1": [3e-5, 2e-5, 4e-6], "T02-S1": [1e-6]}
 
     def extract(compiled, directory, origins, *, seed, proposal, unknown_target, max_rounds, check_samples, resume, log):
