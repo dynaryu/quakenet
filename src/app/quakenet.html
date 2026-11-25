@@ -85,7 +85,12 @@ body.resizing iframe, body.resizing svg { pointer-events: none; }
             grid-template-columns: minmax(0, 1fr) 17px min(var(--side-w, 340px), max(240px, 100% - 17px - 320px));
             grid-template-rows: minmax(0, 1fr); }
 #map-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
-#map { flex: 1 0 260px; min-height: 240px; width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; display: block; }
+#map-viewport { position: relative; flex: 1 0 260px; min-height: 240px; width: 100%; overflow: hidden; background: var(--surface);
+                border: 1px solid var(--border); border-radius: 8px; }
+#map { display: block; width: 100%; height: 100%; }
+/* Zooming scales the courses and positions, not the symbols and line widths: --inv undoes the zoom. */
+#map .sym { transform: scale(var(--inv)); }
+#map polyline { stroke-width: calc(var(--w) * 1px * var(--inv)); }
 #legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 20px; font-size: 12px; color: var(--ink-2); padding: 0 4px; }
 #legend .scale { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
 #legend .ramp { display: flex; height: 10px; width: 160px; border-radius: 2px; overflow: hidden; }
@@ -278,7 +283,7 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 12px; margin-
   /* Too narrow for three columns: the two panels go under the map again, side by side. */
   #map-wrap { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; overflow: auto; gap: 12px; }
   #split-side { display: none; }
-  #map { flex: none; height: clamp(240px, 55dvh, 560px); }
+  #map-viewport { flex: none; height: clamp(240px, 55dvh, 560px); }
   #map-side { overflow: visible; padding-left: 0; border-top: 1px solid var(--border); padding-top: 12px;
               display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
   #map-side #panel-evidence { border-top: none; padding-top: 0; }
@@ -288,7 +293,7 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 12px; margin-
   #pane-map.on { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; }
   #split-results { display: none; }
   #map-wrap { overflow: visible; min-height: auto; }
-  #map { flex: none; height: clamp(200px, 42dvh, 420px); }
+  #map-viewport { flex: none; height: clamp(200px, 42dvh, 420px); }
   #results { border-left: none; border-top: 1px solid var(--border); overflow: visible; }
 }
 @container (max-width: 640px) {
@@ -335,7 +340,9 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 12px; margin-
       <div id="map-wrap">
         <div id="map-main">
           <div id="quake-line"></div>
-          <svg id="map" role="img" aria-label="Network map"></svg>
+          <div id="map-viewport" role="region" aria-label="Interactive network map">
+            <svg id="map" role="img" aria-label="Network map"><g id="map-world"><g id="map-tiles" opacity="0.7"></g><g id="map-net"></g></g></svg>
+          </div>
           <div id="legend"></div>
         </div>
         <div class="divider" id="split-side" role="separator" aria-orientation="vertical" tabindex="0"
@@ -702,73 +709,118 @@ function colour(p, top) {
 
 // ---- map ------------------------------------------------------------------------------------
 
+// The map is drawn in a frame 1000 units wide around the network. The view zooms and pans that frame in pixels:
+// screen = k (S p + o) + t, where S and o fit the frame in the viewport, so k = 1 and t = 0 is the whole network.
+let mapFrame = null, mapView = { k: 1, tx: 0, ty: 0 };
+const MAP_TILE_MAX = 19;                                // the finest tiles OpenStreetMap serves
+
+function applyMapView(value) {
+  mapView = value;
+  hideTip();
+  if (!mapFrame) return;
+  const { k, tx, ty } = value, { S, ox, oy } = mapFrame;
+  $("#map-world").setAttribute("transform", `translate(${k * ox + tx} ${k * oy + ty}) scale(${k * S})`);
+  $("#map-net").style.setProperty("--inv", 1 / k);
+  drawTiles();
+}
+
+function fitMap() {
+  const { clientWidth: w, clientHeight: h } = $("#map-viewport");
+  if (!mapFrame || !w || !h) return;                    // hidden: fitted when the tab is next shown
+  const { W, H } = mapFrame, S = Math.min(w / W, h / H);
+  Object.assign(mapFrame, { S, ox: (w - W * S) / 2, oy: (h - H * S) / 2, fitted: true });
+  applyMapView({ k: 1, tx: 0, ty: 0 });
+}
+
+const mapNavigation = diagramNavigation($("#map-viewport"), {
+  map: true, get: () => mapView, set: applyMapView, fit: fitMap,
+  // In to one screen pixel per pixel of the finest tiles, out to four times the network's extent.
+  limits: () => [0.25, mapFrame?.S ? Math.max(4, 256 * 2 ** MAP_TILE_MAX / (mapFrame.s * mapFrame.S)) : 4],
+  // The viewport takes the pointer to pan, so a tap (which has no hover) shows its tip through here.
+  onClick: (target, e) => {
+    const g = target.closest("#map [data-tip]");
+    g ? showTip(tipHTML(g.dataset.tip, g.dataset.id), e) : hideTip();
+  },
+  help: "Hover over or tap a symbol for its details.",
+});
+new ResizeObserver(() => { if (mapFrame && !mapFrame.fitted) mapNavigation.fit(); }).observe($("#map-viewport"));
+
 function renderMap() {
-  const svg = $("#map"), t = state.ex.network.tables;
+  const t = state.ex.network.tables;
   const nodes = t.Node || [], edges = t.Edge || [], bridges = t.Bridge || [];
   const ev = eventRow();
   const course = edges.flatMap(e => (e.geometry || []).map(([lat, lon]) => ({ lat, lon })));
   const pts = [...nodes, ...bridges, ...course, ...(ev && ev.lat != null ? [ev] : [])];
-  if (!pts.length) { svg.innerHTML = ""; return; }
+  if (!pts.length) { mapFrame = null; $("#map-net").innerHTML = $("#map-tiles").innerHTML = ""; return; }
   const xs = pts.map(p => mercX(p.lon)), ys = pts.map(p => mercY(p.lat));
   const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) || 1e-4, pad = span * 0.08;
   const x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
-  const W = 1000, s = W / (x1 - x0), H = (y1 - y0) * s;   // viewBox units per world unit, the same on both axes
+  const W = 1000, s = W / (x1 - x0), H = (y1 - y0) * s;   // frame units per world unit, the same on both axes
   const X = lon => (mercX(lon) - x0) * s;
   const Y = lat => (mercY(lat) - y0) * s;
-  const u = W / 1000;                                   // one "pixel" in viewBox units
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  // A symbol is drawn around (0, 0) and placed at its point, so zooming can leave its size alone.
+  const symbol = (kind, id, at, body) => `<g data-tip="${kind}" data-id="${esc(id)}" transform="translate(${X(at.lon)} ${Y(at.lat)})">` +
+    `<g class="sym">${body}</g></g>`;
 
   const probs = probabilities(), top = scaleMax(probs);
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   const big = nodes.length <= 40;
-  let h = state.basemap ? tiles(x0, y0, x1, y1, s) : "";
+  let h = "";
   for (const e of edges) {
     const line = edgeCourse(e, byId);
     if (!line) continue;
     const p = line.map(q => `${X(q.lon)},${Y(q.lat)}`).join(" ");
     if (e.fixed_open) {                                 // cannot close: in the graph, not a variable
-      h += `<polyline points="${p}" fill="none" stroke="var(--grid)" stroke-width="${1.5 * u}" stroke-linejoin="round"/>`;
+      h += `<polyline points="${p}" fill="none" stroke="var(--grid)" style="--w:1.5" stroke-linejoin="round"/>`;
       continue;
     }
     const pe = probs[e.id];
     h += `<g data-tip="edge" data-id="${esc(e.id)}"><polyline points="${p}" fill="none" ` +
-         `stroke="${colour(pe?.p, top)}" stroke-width="${(big ? 6 : 3) * u}" stroke-linecap="round" stroke-linejoin="round"/>` +
-         `<polyline points="${p}" fill="none" stroke="transparent" stroke-width="${18 * u}"/></g>`;
+         `stroke="${colour(pe?.p, top)}" style="--w:${big ? 6 : 3}" stroke-linecap="round" stroke-linejoin="round"/>` +
+         `<polyline points="${p}" fill="none" stroke="transparent" style="--w:18"/></g>`;
   }
   for (const b of bridges) {
-    const pb = probs[b.edge], s = (big ? 14 : 8) * u;
-    h += `<g data-tip="bridge" data-id="${esc(b.id)}"><rect x="${X(b.lon) - s / 2}" y="${Y(b.lat) - s / 2}" width="${s}" height="${s}" rx="${2 * u}" ` +
-         `fill="${colour(pb?.p, top)}" stroke="var(--surface)" stroke-width="${2 * u}"/>` +
-         `<rect x="${X(b.lon) - s}" y="${Y(b.lat) - s}" width="${2 * s}" height="${2 * s}" fill="transparent"/></g>`;
+    const pb = probs[b.edge], s = big ? 14 : 8;
+    h += symbol("bridge", b.id, b, `<rect x="${-s / 2}" y="${-s / 2}" width="${s}" height="${s}" rx="2" ` +
+      `fill="${colour(pb?.p, top)}" stroke="var(--surface)" stroke-width="2"/>` +
+      `<rect x="${-s}" y="${-s}" width="${2 * s}" height="${2 * s}" fill="transparent"/>`);
   }
   for (const g of t.GroundFailure || []) {
-    const pg = probs[g.id], s = (big ? 12 : 7) * u, cx = X(g.lon), cy = Y(g.lat);
-    const shape = g.kind === "landslide" ? `${cx},${cy - s} ${cx + s},${cy + s * 0.8} ${cx - s},${cy + s * 0.8}`        // triangle
-                : g.kind === "liquefaction" ? `${cx},${cy - s} ${cx + s},${cy} ${cx},${cy + s} ${cx - s},${cy}`      // diamond
-                : `${cx - s},${cy - s * 0.35} ${cx + s},${cy - s * 0.35} ${cx + s},${cy + s * 0.35} ${cx - s},${cy + s * 0.35}`; // bar: fault
-    h += `<g data-tip="ground" data-id="${esc(g.id)}"><polygon points="${shape}" fill="${colour(pg?.p, top)}" ` +
-         `stroke="var(--ink)" stroke-width="${1 * u}"/><circle cx="${cx}" cy="${cy}" r="${2 * s}" fill="transparent"/></g>`;
+    const pg = probs[g.id], s = big ? 12 : 7;
+    const shape = g.kind === "landslide" ? `0,${-s} ${s},${s * 0.8} ${-s},${s * 0.8}`                                   // triangle
+                : g.kind === "liquefaction" ? `0,${-s} ${s},0 0,${s} ${-s},0`                                           // diamond
+                : `${-s},${-s * 0.35} ${s},${-s * 0.35} ${s},${s * 0.35} ${-s},${s * 0.35}`;                            // bar: fault
+    h += symbol("ground", g.id, g, `<polygon points="${shape}" fill="${colour(pg?.p, top)}" ` +
+      `stroke="var(--ink)" stroke-width="1"/><circle r="${2 * s}" fill="transparent"/>`);
   }
   for (const n of nodes) {
-    const pn = probs[n.id], r = (big ? 9 : 5) * u, cx = X(n.lon), cy = Y(n.lat);
+    const pn = probs[n.id], r = big ? 9 : 5;
     const fill = n.key_destination ? "var(--surface)" : pn ? colour(pn.p, top) : "var(--idle)";
-    h += `<g data-tip="node" data-id="${esc(n.id)}">` +
-         (n.key_destination ? `<circle cx="${cx}" cy="${cy}" r="${r + 5 * u}" fill="none" stroke="var(--ink)" stroke-width="${2 * u}"/>` : "") +
-         `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}" stroke="var(--ink)" stroke-width="${1.5 * u}"/>` +
-         `<circle cx="${cx}" cy="${cy}" r="${r * 2.2}" fill="transparent"/>` +
-         (big ? `<text x="${cx + r + 6 * u}" y="${cy - r - 2 * u}" font-size="${13 * u}">${esc(n.id)}</text>` : "") + `</g>`;
+    h += symbol("node", n.id, n,
+      (n.key_destination ? `<circle r="${r + 5}" fill="none" stroke="var(--ink)" stroke-width="2"/>` : "") +
+      `<circle r="${r}" fill="${fill}" stroke="var(--ink)" stroke-width="1.5"/>` +
+      `<circle r="${r * 2.2}" fill="transparent"/>` +
+      (big ? `<text x="${r + 6}" y="${-r - 2}" font-size="13">${esc(n.id)}</text>` : ""));
   }
   if (ev && ev.lat != null) {
-    const cx = X(ev.lon), cy = Y(ev.lat), R = 13 * u;
+    const R = 13;
     const star = Array.from({ length: 10 }, (_, i) => {
       const a = -Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? R * 0.45 : R;
-      return `${cx + rr * Math.cos(a)},${cy + rr * Math.sin(a)}`;
+      return `${rr * Math.cos(a)},${rr * Math.sin(a)}`;
     }).join(" ");
-    h += `<g data-tip="event" data-id="${esc(ev.id)}"><polygon points="${star}" fill="var(--ink)" stroke="var(--surface)" stroke-width="${2 * u}"/>` +
-         `<text x="${cx + R + 4 * u}" y="${cy + 4 * u}" font-size="${13 * u}">M${esc(ev.mw)}</text>` +
-         `<circle cx="${cx}" cy="${cy}" r="${R * 1.6}" fill="transparent"/></g>`;
+    h += symbol("event", ev.id, ev, `<polygon points="${star}" fill="var(--ink)" stroke="var(--surface)" stroke-width="2"/>` +
+      `<text x="${R + 4}" y="4" font-size="13">M${esc(ev.mw)}</text>` +
+      `<circle r="${R * 1.6}" fill="transparent"/>`);
   }
-  svg.innerHTML = h;
+  $("#map-net").innerHTML = h;
+  $("#map-tiles").style.filter = darkTheme() ? "grayscale(1) invert(1) brightness(0.75) contrast(0.9)" : "grayscale(1) brightness(1.05) contrast(0.85)";
+  // A run, the theme or the colouring leaves the view alone; another network or epicentre is shown whole.
+  const key = [x0, x1, y0, y1].join();
+  if (mapFrame?.key !== key) {
+    mapFrame = { key, x0, y0, s, W, H, S: 0, ox: 0, oy: 0, fitted: false };
+    $("#map-tiles").innerHTML = "";
+    mapNavigation.fit();
+  } else drawTiles();
   renderLegend(top, !!state.result);
 }
 
@@ -785,17 +837,46 @@ const mercY = lat => (1 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)
 const darkTheme = () => document.documentElement.dataset.theme
   ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
 
-function tiles(x0, y0, x1, y1, s) {
-  // OpenStreetMap's standard tiles, greyed so the network's colours stay readable (inverted in dark mode),
-  // at the zoom whose tiles are about 128-256 viewBox units across.
-  const z = Math.max(0, Math.min(18, Math.ceil(Math.log2(s / 256)))), n = 2 ** z, size = s / n;
-  const filter = darkTheme() ? "grayscale(1) invert(1) brightness(0.75) contrast(0.9)" : "grayscale(1) brightness(1.05) contrast(0.85)";
-  let h = `<g opacity="0.7" style="filter:${filter}">`;
-  for (let i = Math.floor(x0 * n); i <= Math.floor(x1 * n); i++)
-    for (let j = Math.floor(y0 * n); j <= Math.floor(y1 * n); j++)
-      h += `<image href="https://tile.openstreetmap.org/${z}/${i}/${j}.png" ` +
-           `x="${(i / n - x0) * s}" y="${(j / n - y0) * s}" width="${size + 0.5}" height="${size + 0.5}" preserveAspectRatio="none"/>`;
-  return h + `</g>`;
+// OpenStreetMap's standard tiles over the part in view, greyed so the network's colours stay readable (inverted in
+// dark mode), at the zoom whose tiles are 128-256 pixels across. A new zoom's tiles wait until the zooming pauses,
+// and the tiles they replace stay underneath until they have loaded.
+let tileTimer = 0;
+function drawTiles(settled = false) {
+  clearTimeout(tileTimer);
+  const layer = $("#map-tiles");
+  if (!state.basemap || !mapFrame) { layer.innerHTML = ""; return; }
+  const { clientWidth: w, clientHeight: h } = $("#map-viewport");
+  if (!w || !h || !mapFrame.fitted) return;
+  const { x0, y0, s, S, ox, oy } = mapFrame, { k, tx, ty } = mapView;
+  const z = Math.max(0, Math.min(MAP_TILE_MAX, Math.ceil(Math.log2(s * S * k / 256)))), n = 2 ** z, size = s / n;
+  let level = layer.querySelector(`[data-z="${z}"]`);
+  if (!settled && layer.childElementCount && layer.lastElementChild !== level) {
+    tileTimer = setTimeout(drawTiles, 150, true);
+    return;
+  }
+  const ns = "http://www.w3.org/2000/svg";
+  if (!level) { level = document.createElementNS(ns, "g"); level.dataset.z = z; }
+  if (layer.lastElementChild !== level) layer.append(level);
+  // Tile indices at the viewport's edges.
+  const col = px => Math.floor((((px - tx) / k - ox) / S / s + x0) * n), row = py => Math.floor((((py - ty) / k - oy) / S / s + y0) * n);
+  const clip = i => Math.max(0, Math.min(n - 1, i)), wanted = new Set();
+  for (let i = clip(col(0)); i <= clip(col(w)); i++)
+    for (let j = clip(row(0)); j <= clip(row(h)); j++) wanted.add(`${i}/${j}`);
+  const tidy = () => {
+    if (layer.lastElementChild === level && !level.querySelector("image:not([data-done])"))
+      while (layer.firstElementChild !== level) layer.firstElementChild.remove();
+  };
+  for (const image of [...level.children]) if (!wanted.delete(image.dataset.tile)) image.remove();
+  for (const tile of wanted) {
+    const [i, j] = tile.split("/").map(Number), image = document.createElementNS(ns, "image");
+    image.dataset.tile = tile;
+    const at = { x: (i / n - x0) * s, y: (j / n - y0) * s, width: size * 1.002, height: size * 1.002, preserveAspectRatio: "none" };
+    for (const [name, value] of Object.entries(at)) image.setAttribute(name, value);
+    image.onload = image.onerror = () => { image.dataset.done = ""; tidy(); };
+    image.setAttribute("href", `https://tile.openstreetmap.org/${z}/${tile}.png`);
+    level.append(image);
+  }
+  tidy();
 }
 
 function renderLegend(top, ran) {
